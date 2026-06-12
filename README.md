@@ -1,281 +1,77 @@
-# SketchForge
+<div align="center">
+  <table>
+    <tr>
+      <td width="180" align="center">
+        <img src="apps/web/public/assets/sketchforge/sketchforge-logo.png" width="150" alt="SketchForge logo">
+      </td>
+      <td>
+        <h1 align="right">SketchForge</h1>
+        <h3 align="right">A local-first 3D design editor that runs in your browser.</h3>
+        <p align="right">
+          Build shapes, cut holes, group parts, import STL files, and export models without accounts, cloud lock-in, or heavyweight CAD setup.
+        </p>
+      </td>
+    </tr>
+  </table>
 
-SketchForge is a local-first browser 3D editor for building, grouping, cutting, importing STL files, and exporting models from the same workspace you see on screen.
+  <p>
+    <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-16a34a"></a>
+    <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-95%25-3178c6">
+    <img alt="Next.js" src="https://img.shields.io/badge/Next.js-15-black">
+    <img alt="Three.js" src="https://img.shields.io/badge/Three.js-3D-111827">
+    <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
+  </p>
+</div>
 
-It is built around a simple idea: open the app, place shapes, turn some shapes into holes, group the result, import external STL models when primitives are not enough, and export the finished design without needing an account.
+![SketchForge editor showing a selected block on the workplane](docs/media/editor-block.png)
 
-![A red block placed in the SketchForge editor](docs/media/editor-block.png)
+## Why SketchForge
 
-## Contents
+SketchForge is a lightweight CAD-style workspace for people who want to sketch, cut, and export 3D models quickly.
 
-- [What SketchForge Is](#what-sketchforge-is)
-- [Highlights](#highlights)
-- [Feature Tour](#feature-tour)
-- [Media And Demo Videos](#media-and-demo-videos)
-- [Quick Start](#quick-start)
-- [Project Structure](#project-structure)
-- [Local Data](#local-data)
-- [Current Status](#current-status)
-- [Tech Stack](#tech-stack)
-- [Development Scripts](#development-scripts)
-- [Contributing](#contributing)
-- [Security](#security)
-- [License](#license)
+It is built for the satisfying loop: drop a shape, resize it, rotate it, make another shape a hole, group the result, import an STL if primitives are not enough, and export the finished model.
 
-## What SketchForge Is
+No login. No server project storage. No heavyweight CAD install just to make a useful part.
 
-SketchForge is an experimental CAD-style editor made for fast 3D scene building in the browser. It focuses on the core workflows that make a lightweight modeling tool useful:
+## What It Does
 
-- add primitive shapes to a workplane
-- move, scale, rotate, lift, mirror, align, copy, paste, and delete objects
-- mark objects as holes
-- group solids and holes into a new result
-- import STL files and use them alongside built-in shapes
-- export the whole workspace or only the selected objects as STL/OBJ
-- keep projects local in the browser with generated thumbnails
+- **Local-first projects** - designs live in browser storage with generated project thumbnails.
+- **Real 3D workplane** - grid, camera controls, snap settings, transform handles, outlines, and inspector controls.
+- **Primitive shape library** - boxes, cylinders, spheres, cones, pyramids, wedges, text, roofs, half spheres, torus shapes, tubes, and more.
+- **Solid and hole workflow** - turn shapes into cutters and group them into final geometry.
+- **STL import** - bring outside models into the same workspace as primitives.
+- **STL and OBJ export** - export selected objects or the whole scene.
+- **Fast browser stack** - Next.js, React, TypeScript, Three.js, and Manifold/CSG geometry tooling.
 
-The project is still alpha, but the main editor loop is already usable: create a project, build a shape, import STL, group, export, come back later.
-
-## Highlights
-
-- **Local-first projects**  
-  Designs are stored in browser storage. No account or backend database is required for ordinary use.
-
-- **Real editor workspace**  
-  The workplane includes camera controls, snap grid settings, transform handles, shape inspector controls, and selected-object outlines.
-
-- **Primitive shape library**  
-  Add boxes, cylinders, spheres, cones, pyramids, wedges, text, round roofs, half spheres, torus shapes, tubes, and holes.
-
-- **Hole and grouping workflow**  
-  Turn shapes into holes, combine them with solids, and create cut geometry that exports as it appears.
-
-- **STL import**  
-  Bring in external STL files and mix them with SketchForge primitives.
-
-- **STL and OBJ export**  
-  Export selected objects when something is selected, or export the entire workspace when nothing is selected.
-
-- **Project dashboard**  
-  Projects appear as cards with generated thumbnails. New edits can update the preview image, and projects can be deleted with confirmation.
-
-- **Browser-based stack**  
-  Built with Next.js, React, TypeScript, Three.js, and Manifold/CSG geometry tooling.
-
-## Feature Tour
-
-### Editor Workplane
-
-The editor centers the design around a grid workplane. Shapes can be added from the toolbar, selected in the viewport, and adjusted with visible transform handles.
-
-Current editor controls include:
-
-- add shape
-- copy, paste, duplicate, and delete
-- undo and redo
-- hide/show controls
-- group and ungroup
-- align and mirror
-- workplane/drop controls
-- import and export
-- workspace settings
-- snap grid selector
-- camera home, fit, zoom, and camera mode buttons
-
-### Shape Inspector
-
-Selecting a shape opens a side inspector for object-specific controls. For a box, the inspector exposes:
-
-- solid/hole mode
-- radius
-- steps
-- length
-- width
-- height
-
-Other shapes expose the controls that match their geometry.
-
-### Primitive Shapes
-
-SketchForge includes a starter shape set for building quickly:
-
-- Box
-- Cylinder
-- Sphere
-- Cone
-- Pyramid
-- Wedge
-- Text
-- Round Roof
-- Half Sphere
-- Torus
-- Tube
-
-Each shape can be moved, resized, lifted, rotated, copied, mirrored, aligned, hidden, grouped, or exported.
-
-### Holes And Boolean Grouping
-
-Shapes can be switched from solid mode to hole mode. When grouped with solids, holes are used as cutters so the final model matches the visible grouped result.
-
-This workflow is important for:
-
-- making slots
-- cutting mounting holes
-- carving through imported STL parts
-- testing enclosure-style designs
-- combining simple primitives into useful printable shapes
-
-### STL Import
-
-STL import lets SketchForge work with existing 3D models instead of only built-in primitives.
-
-Useful examples:
-
-- import a board model and cut holes through it
-- place imported parts next to primitive supports
-- combine an STL with simple boxes/cylinders for rough enclosure planning
-- export the final scene after editing
-
-### Export
-
-SketchForge supports STL and OBJ export.
-
-Export behavior:
-
-- if objects are selected, only the selected objects are exported
-- if nothing is selected, the whole workspace is exported
-- grouped/hole results export as the geometry shown in the editor
-
-### Dashboard
-
-The dashboard is the project home screen. It supports:
-
-- creating a new 3D design
-- importing STL directly into a new project
-- continuing the latest workplane
-- searching projects
-- grid/list project views
-- project thumbnails
-- project delete confirmation
-- download/export location settings
-
-## Media And Demo Videos
-
-A first editor demo is included below.
+## Demo
 
 ![SketchForge editor demo preview](docs/media/videos/01-create-and-edit-block-preview.gif)
 
 ## Quick Start
 
-### Requirements
+Requirements:
 
 - Node.js 20 or newer
 - npm
 
-### Install
-
 ```bash
 npm install
-```
-
-### Run The Development Server
-
-```bash
 npm run dev
 ```
 
-Open the app:
+Open:
 
 ```text
 http://127.0.0.1:3000/
 ```
 
-### Type Check
+## Development
 
 ```bash
 npm run typecheck
 ```
 
-### Production Build
-
-```bash
-npm run build
-```
-
-## Project Structure
-
-```text
-apps/web/                 Next.js app workspace
-apps/web/src/app/         App routes, dashboard, API routes, and app styles
-apps/web/src/components/  Editor, viewport, shape sidebar, icons, and tool controls
-apps/web/src/types/       Shared SketchForge shape and editor types
-apps/web/src/generated/   Generated Manifold runtime source used by the app
-apps/web/src/lib/         Small shared utilities
-apps/web/public/assets/   Static image, icon, logo, and shape assets
-apps/web/public/manifold.*  Manifold runtime files used by geometry tooling
-docs/media/               README screenshots and future demo videos
-.github/                  Issue templates, community health files, and pull request template
-```
-
-## Local Data
-
-SketchForge stores project data in the browser.
-
-- dashboard project metadata is saved in `localStorage`
-- project shape data is saved in IndexedDB
-- generated project thumbnails are stored through the local project-thumbnail API
-- clearing browser storage can remove local projects
-
-Because storage is local-first, projects are not automatically synced between browsers or devices.
-
-## Current Status
-
-SketchForge is an alpha project.
-
-Working today:
-
-- project dashboard
-- project creation and deletion
-- generated project thumbnails
-- primitive shape editing
-- STL import
-- solid/hole switching
-- grouping and ungrouping
-- STL/OBJ export
-- selected-only export
-- local browser persistence
-
-Still needs more work:
-
-- broader automated coverage for editor workflows
-- more real-world STL test cases
-- more polish around complex geometry edge cases
-- documentation videos
-- public release notes as the app stabilizes
-
-## Tech Stack
-
-- Next.js
-- React
-- TypeScript
-- Three.js
-- Manifold / CSG geometry tooling
-- Lucide icons
-- Browser storage APIs
-
-## Development Scripts
-
-```bash
-npm run dev
-```
-
-Start the local development server.
-
-```bash
-npm run typecheck
-```
-
-Run TypeScript checks without emitting build output.
+Run TypeScript checks.
 
 ```bash
 npm run build
@@ -289,21 +85,46 @@ npm run export
 
 Build with static export mode enabled.
 
+## Project Layout
+
+```text
+apps/web/                   Next.js app workspace
+apps/web/src/app/           App routes, dashboard, API routes, styles
+apps/web/src/components/    Editor, viewport, sidebar, icons, controls
+apps/web/src/types/         Shared shape and editor types
+apps/web/src/generated/     Generated Manifold runtime source
+apps/web/src/lib/           Shared utilities
+apps/web/public/assets/     Static app images, icons, logos, shape assets
+docs/media/                 README screenshots and demo videos
+.github/                    Issue templates and community files
+```
+
+## Current Status
+
+SketchForge is alpha, but the core editor loop is usable today:
+
+- create and reopen local projects
+- add, move, resize, rotate, mirror, align, duplicate, hide, and delete shapes
+- switch shapes between solid and hole modes
+- group and ungroup geometry
+- import STL files
+- export STL or OBJ
+- generate project thumbnails
+
+The next big areas are workflow polish, more geometry edge-case testing, stronger automated editor coverage, and better release documentation.
+
 ## Contributing
 
-Contributions are welcome.
-
-Good areas to help:
+Contributions are welcome. Good places to help:
 
 - editor bug fixes
-- geometry/grouping test cases
+- geometry and boolean test cases
 - STL import/export edge cases
 - UI polish
 - documentation screenshots and videos
-- accessibility improvements
-- performance work for larger scenes
+- accessibility and performance improvements
 
-Before opening a pull request, read [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md).
+Read [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) before opening a pull request.
 
 ## Security
 
