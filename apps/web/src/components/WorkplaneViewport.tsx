@@ -680,6 +680,21 @@ function resizeCenterFromAnchor(frame: SelectionFrame, anchor: THREE.Vector3, si
     .add(frame.zAxis.clone().multiplyScalar(signs.z ? (signs.z * depth) / 2 : 0));
 }
 
+function resizedShapeSize(width: number, depth: number) {
+  return Math.max(width, depth);
+}
+
+function resizedShapePatchFromFrame(shape: WorkplaneShape, center: THREE.Vector3, width: number, depth: number): Partial<WorkplaneShape> {
+  return {
+    x: cleanNearZero(center.x, 0.0005),
+    z: cleanNearZero(center.z, 0.0005),
+    elevation: cleanNearZero(center.y - shape.height / 2, 0.0005),
+    width,
+    depth,
+    size: resizedShapeSize(width, depth),
+  };
+}
+
 function shapeScreenBounds(state: ThreeState, shape: WorkplaneShape) {
   const frame = selectionFrameForShapes([shape], [shape.id]);
   if (!frame) {
@@ -854,14 +869,7 @@ function resizeShapeFromFrameHandle(
   const nextCenter = altKey
     ? frame.center.clone()
     : resizeCenterFromAnchor(frame, transform.scaleAnchorPoint ?? resizeAnchorPointForFrame(frame, signs), signs, nextWidth, nextDepth);
-  return {
-    x: nextCenter.x,
-    z: nextCenter.z,
-    elevation: cleanNearZero(nextCenter.y - shape.height / 2, 0.0005),
-    width: nextWidth,
-    depth: nextDepth,
-    size: (nextWidth + nextDepth) / 2,
-  };
+  return resizedShapePatchFromFrame(shape, nextCenter, nextWidth, nextDepth);
 }
 
 function resizeSelectionFromHandle(
@@ -925,7 +933,7 @@ function resizeSelectionFromHandle(
       elevation: cleanNearZero(nextItemCenter.y - item.startShape.height / 2, 0.0005),
       width,
       depth,
-      size: (width + depth) / 2,
+      size: resizedShapeSize(width, depth),
     } satisfies Partial<WorkplaneShape>;
     return {
       id: item.id,
@@ -1631,9 +1639,9 @@ export function WorkplaneViewport({
     if (Number.isFinite(value) && value > 0) {
       const nextValue = Math.max(MIN_SHAPE_SIZE, value);
       if (edit.axis === "width") {
-        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { width: nextValue, size: (nextValue + shapeDepth(shape)) / 2 }));
+        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { width: nextValue, size: resizedShapeSize(nextValue, shapeDepth(shape)) }));
       } else if (edit.axis === "depth") {
-        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { depth: nextValue, size: (shapeWidth(shape) + nextValue) / 2 }));
+        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { depth: nextValue, size: resizedShapeSize(shapeWidth(shape), nextValue) }));
       } else {
         onUpdateShape(id, patchWithPreservedWorldBottom(shape, { height: nextValue }));
       }
@@ -2851,8 +2859,8 @@ function formatPanelNumber(value: number) {
 function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<WorkplaneShape>) => void): ShapePropertyConfig[] {
   const width = shapeWidth(shape);
   const depth = shapeDepth(shape);
-  const setWidth = (value: number) => onUpdate({ width: value, size: (value + depth) / 2 });
-  const setDepth = (value: number) => onUpdate({ depth: value, size: (width + value) / 2 });
+  const setWidth = (value: number) => onUpdate({ width: value, size: resizedShapeSize(value, depth) });
+  const setDepth = (value: number) => onUpdate({ depth: value, size: resizedShapeSize(width, value) });
   const setBaseRadius = (value: number) => onUpdate({ baseRadius: value, width: value * 2, depth: value * 2, size: value * 2 });
 
   if (shape.kind === "box") {
@@ -4158,20 +4166,35 @@ function createSelectedGroundFootprint(shape: WorkplaneShape) {
     return null;
   }
 
-  const minX = Math.min(...corners.map((corner) => corner.x));
-  const maxX = Math.max(...corners.map((corner) => corner.x));
-  const minZ = Math.min(...corners.map((corner) => corner.z));
-  const maxZ = Math.max(...corners.map((corner) => corner.z));
-  const width = Math.max(MIN_SHAPE_SIZE, maxX - minX);
-  const depth = Math.max(MIN_SHAPE_SIZE, maxZ - minZ);
-  const centerX = (minX + maxX) / 2;
-  const centerZ = (minZ + maxZ) / 2;
   const group = new THREE.Group();
   group.name = "SelectedGroundFootprint";
   group.userData.shapeId = shape.id;
 
+  const y = 0.04;
+  const footprint = [
+    framePoint(frame, frame.min.x, frame.min.y, frame.min.z),
+    framePoint(frame, frame.max.x, frame.min.y, frame.min.z),
+    framePoint(frame, frame.max.x, frame.min.y, frame.max.z),
+    framePoint(frame, frame.min.x, frame.min.y, frame.max.z),
+  ].map((point) => new THREE.Vector3(point.x, y, point.z));
+  const fillGeometry = new THREE.BufferGeometry();
+  fillGeometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(
+      new Float32Array([
+        footprint[0].x, footprint[0].y, footprint[0].z,
+        footprint[1].x, footprint[1].y, footprint[1].z,
+        footprint[2].x, footprint[2].y, footprint[2].z,
+        footprint[0].x, footprint[0].y, footprint[0].z,
+        footprint[2].x, footprint[2].y, footprint[2].z,
+        footprint[3].x, footprint[3].y, footprint[3].z,
+      ]),
+      3,
+    ),
+  );
+  fillGeometry.computeVertexNormals();
   const fill = new THREE.Mesh(
-    new THREE.PlaneGeometry(width, depth),
+    fillGeometry,
     new THREE.MeshBasicMaterial({
       color: "#7f8f95",
       transparent: true,
@@ -4180,18 +4203,9 @@ function createSelectedGroundFootprint(shape: WorkplaneShape) {
       side: THREE.DoubleSide,
     }),
   );
-  fill.rotation.x = -Math.PI / 2;
-  fill.position.set(centerX, 0.028, centerZ);
   group.add(fill);
 
-  const y = 0.04;
-  const points = [
-    new THREE.Vector3(minX, y, minZ),
-    new THREE.Vector3(maxX, y, minZ),
-    new THREE.Vector3(maxX, y, maxZ),
-    new THREE.Vector3(minX, y, maxZ),
-    new THREE.Vector3(minX, y, minZ),
-  ];
+  const points = [...footprint, footprint[0].clone()];
   const outline = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
     new THREE.LineBasicMaterial({ color: "#00aeea", transparent: true, opacity: 0.92 }),
