@@ -42,7 +42,7 @@ import {
   ToolbarVectorExportIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, ShapeAsset, WorkplaneShape } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type TopPanel = "import" | "export" | "builder" | "tips" | "profile" | "settings" | null;
 type ExportFormat = "stl" | "obj";
@@ -4142,16 +4142,22 @@ function projectShapesFingerprint(shapes: WorkplaneShape[]) {
 
 export function SketchForgeEditor({
   initialShapes = [],
+  initialSnap,
+  initialWorkspace,
   onHome,
   onProjectShapesChange,
   onProjectSnapshot,
+  onProjectWorkspaceChange,
   projectId,
   projectRevision = 0,
 }: {
   initialShapes?: WorkplaneShape[];
+  initialSnap?: GridSize;
+  initialWorkspace?: WorkplaneWorkspaceSettings;
   onHome?: () => void;
   onProjectShapesChange?: (snapshot: { projectId: string; shapes: WorkplaneShape[] }) => void;
   onProjectSnapshot?: (snapshot: { image: string; projectId: string; shapes: number }) => void;
+  onProjectWorkspaceChange?: (snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
   projectId?: string | null;
   projectRevision?: number;
 } = {}) {
@@ -4332,6 +4338,16 @@ export function SketchForgeEditor({
     projectInteractionActiveRef.current = active;
     setProjectInteractionActive((current) => (current === active ? current : active));
   }, []);
+
+  const updateProjectWorkspaceSettings = useCallback(
+    (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
+      if (!projectId || !onProjectWorkspaceChange) {
+        return;
+      }
+      onProjectWorkspaceChange({ projectId, ...settings });
+    },
+    [onProjectWorkspaceChange, projectId],
+  );
 
   const commitShapes = useCallback(
     (next: WorkplaneShape[], nextSelection: string | string[] | null = selectedIds, message?: string) => {
@@ -5448,6 +5464,9 @@ export function SketchForgeEditor({
           mirrorReferenceShapes={shapes}
           placementElevation={placementElevation}
           workplaneMode={workplaneMode}
+          initialSnap={initialSnap}
+          initialWorkspace={initialWorkspace}
+          workspaceSettingsKey={projectId ?? "local-workplane"}
           onAddShape={addShape}
           onAlignAnchorChange={chooseAlignAnchor}
           onAlignPreview={previewAlignSelection}
@@ -5460,6 +5479,7 @@ export function SketchForgeEditor({
           onSetPlacementElevation={setPlacementWorkplane}
           onInteractionActiveChange={updateProjectInteractionActive}
           onUpdateShape={updateShape}
+          onWorkspaceSettingsChange={updateProjectWorkspaceSettings}
           onWorkplaneModeChange={setWorkplaneMode}
         />
       </div>

@@ -15,6 +15,7 @@ import helvetikerBoldFontJson from "three/examples/fonts/helvetiker_bold.typefac
 import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json";
 import { ToolbarHideSelectedIcon } from "@/components/icons";
 import { AlignOverlay, MirrorOverlay, type AlignOverlayState, type MirrorOverlayState } from "@/components/workplane/ActionOverlays";
+import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
 import {
   TransformOverlay,
   getElevationMeasureKey,
@@ -30,7 +31,7 @@ import {
   type TransformHandleKind,
   type TransformOverlayState,
 } from "@/components/workplane/TransformOverlay";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, WorkplaneShape } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 const gridSizes: GridSize[] = ["Off", "0.1 mm", "0.25 mm", "0.5 mm", "1.0 mm", "2.0 mm", "5.0 mm", "Brick"];
 const WORKPLANE_WIDTH = 200;
@@ -39,20 +40,7 @@ const MIN_WORKSPACE_SIZE = 60;
 const MAX_WORKSPACE_SIZE = 2000;
 const MIN_GRID_BLOCK_SIZE = 1;
 const MAX_GRID_BLOCK_SIZE = 200;
-const DEFAULT_WORKSPACE = {
-  width: 200,
-  depth: 200,
-  sizePreset: "200 x 200 mm",
-  gridBlockSize: 5,
-  gridBlockPreset: "5 mm",
-  background: "#f8fbfc",
-  showShadows: true,
-  showGrid: true,
-  cruiseShapes: true,
-  zoomSpeed: 5,
-  units: "Metric (Default)",
-  scale: "1:1 (millimeters)",
-};
+const DEFAULT_WORKSPACE = DEFAULT_WORKPLANE_WORKSPACE;
 const workspaceSizePresets = [
   { label: "200 x 200 mm", width: 200, depth: 200 },
   { label: "300 x 300 mm", width: 300, depth: 300 },
@@ -128,6 +116,9 @@ type WorkplaneViewportProps = {
   mirrorReferenceShapes: WorkplaneShape[];
   placementElevation: number;
   workplaneMode: boolean;
+  initialSnap?: GridSize;
+  initialWorkspace?: WorkplaneWorkspaceSettings;
+  workspaceSettingsKey?: string | null;
   onAddShape: (shape: ShapeAsset, point?: { x: number; z: number; elevation?: number }) => void;
   onAlignAnchorChange: (id: string) => void;
   onAlignPreview: (axis: AlignAxis, target: AlignTarget) => void;
@@ -140,10 +131,11 @@ type WorkplaneViewportProps = {
   onSetPlacementElevation: (elevation: number, source: "shape" | "base") => void;
   onInteractionActiveChange?: (active: boolean) => void;
   onUpdateShape: (id: string, patch: ShapeUpdatePatch) => void;
+  onWorkspaceSettingsChange?: (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
   onWorkplaneModeChange: (active: boolean) => void;
 };
 
-type WorkspaceSettings = typeof DEFAULT_WORKSPACE;
+type WorkspaceSettings = WorkplaneWorkspaceSettings;
 
 type ThreeState = {
   renderer: THREE.WebGLRenderer;
@@ -875,6 +867,9 @@ export function WorkplaneViewport({
   mirrorReferenceShapes,
   placementElevation,
   workplaneMode,
+  initialSnap,
+  initialWorkspace,
+  workspaceSettingsKey,
   onAddShape,
   onAlignAnchorChange,
   onAlignPreview,
@@ -887,12 +882,13 @@ export function WorkplaneViewport({
   onSetPlacementElevation,
   onInteractionActiveChange,
   onUpdateShape,
+  onWorkspaceSettingsChange,
   onWorkplaneModeChange,
 }: WorkplaneViewportProps) {
   const [snapOpen, setSnapOpen] = useState(false);
-  const [snap, setSnap] = useState<GridSize>("1.0 mm");
+  const [snap, setSnap] = useState<GridSize>(() => normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<WorkspaceSettings>(DEFAULT_WORKSPACE);
+  const [workspace, setWorkspace] = useState<WorkspaceSettings>(() => normalizeWorkspaceSettings(initialWorkspace));
   const [transformOverlay, setTransformOverlay] = useState<TransformOverlayState | null>(null);
   const [alignOverlay, setAlignOverlay] = useState<AlignOverlayState | null>(null);
   const [mirrorOverlay, setMirrorOverlay] = useState<MirrorOverlayState | null>(null);
@@ -918,6 +914,8 @@ export function WorkplaneViewport({
   const suppressNextLiftEditRef = useRef(false);
   const snapRef = useRef(snap);
   const workspaceRef = useRef(workspace);
+  const workspaceSettingsKeyRef = useRef(workspaceSettingsKey ?? null);
+  const lastWorkspaceSettingsSyncRef = useRef("");
   const viewCubeRef = useRef<HTMLDivElement | null>(null);
   const transformOverlayRef = useRef<TransformOverlayState | null>(null);
   const alignOverlayRef = useRef<AlignOverlayState | null>(null);
@@ -939,6 +937,27 @@ export function WorkplaneViewport({
 
   const placementElevationRef = useRef(placementElevation);
   const workplaneModeRef = useRef(workplaneMode);
+
+  useEffect(() => {
+    const nextKey = workspaceSettingsKey ?? null;
+    if (workspaceSettingsKeyRef.current !== nextKey) {
+      workspaceSettingsKeyRef.current = nextKey;
+      lastWorkspaceSettingsSyncRef.current = "";
+    }
+    setSnap(normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
+    setWorkspace(normalizeWorkspaceSettings(initialWorkspace));
+  }, [initialSnap, initialWorkspace, workspaceSettingsKey]);
+
+  useEffect(() => {
+    const normalizedWorkspace = normalizeWorkspaceSettings(workspace);
+    const normalizedSnap = normalizeSnapGrid(snap, DEFAULT_SNAP_GRID);
+    const fingerprint = workplaneSettingsFingerprint(normalizedWorkspace, normalizedSnap);
+    if (lastWorkspaceSettingsSyncRef.current === fingerprint) {
+      return;
+    }
+    lastWorkspaceSettingsSyncRef.current = fingerprint;
+    onWorkspaceSettingsChange?.({ workspace: normalizedWorkspace, snap: normalizedSnap });
+  }, [onWorkspaceSettingsChange, snap, workspace]);
 
   useEffect(() => {
     const openWorkspaceSettings = () => setSettingsOpen(true);
@@ -1032,6 +1051,10 @@ export function WorkplaneViewport({
       threeRef.current.needsRender = true;
     }
   }, [workspace]);
+
+  useEffect(() => {
+    setSelectionHelpersVisible(threeRef.current, activeTransformKind !== "rotate");
+  }, [activeTransformKind]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -1254,6 +1277,7 @@ export function WorkplaneViewport({
       }
       setActiveRotationWheel(kind === "rotate");
       setActiveTransformKind(kind);
+      setSelectionHelpersVisible(state ?? null, kind !== "rotate");
       if (kind === "rotate") {
         setRotationWheelAxis(rotationAxis);
         setPinnedRotationWheelView(wheel && rotationPlane ? { axis: rotationAxis, wheel: { ...wheel }, plane: { ...rotationPlane } } : null);
@@ -1501,6 +1525,7 @@ export function WorkplaneViewport({
     setPinnedRotationWheelView(null);
     setRotationReadout(null);
     if (threeRef.current) {
+      setSelectionHelpersVisible(threeRef.current, true);
       threeRef.current.controls.enabled = true;
     }
     onInteractionActiveChange?.(false);
@@ -1743,6 +1768,7 @@ export function WorkplaneViewport({
         }
         setActiveRotationWheel(handle.kind === "rotate");
         setActiveTransformKind(handle.kind);
+        setSelectionHelpersVisible(state, handle.kind !== "rotate");
         if (handle.kind === "rotate") {
           setRotationWheelAxis(rotationAxis);
           setPinnedRotationWheelView(wheel && rotationPlane ? { axis: rotationAxis, wheel: { ...wheel }, plane: { ...rotationPlane } } : null);
@@ -2001,6 +2027,7 @@ export function WorkplaneViewport({
         setActiveTransformKind(null);
         setRotationReadout(null);
         if (state) {
+          setSelectionHelpersVisible(state, true);
           state.controls.enabled = true;
         }
         onInteractionActiveChange?.(false);
@@ -2194,6 +2221,7 @@ export function WorkplaneViewport({
               editingRotation={editingRotation}
               rotationReadout={rotationReadout}
               showRotationWheel={activeRotationWheel}
+              hideSelectionChrome={activeTransformKind === "rotate"}
               hideDimensionMarks={activeTransformKind === "scale"}
               rotationWheelAxis={rotationWheelAxis}
               pinnedRotationWheelView={pinnedRotationWheelView}
@@ -3155,6 +3183,14 @@ function rebuildSelectionHelpers(state: ThreeState | null, shapes: WorkplaneShap
       state.helperLayer.add(shadow);
     }
   });
+}
+
+function setSelectionHelpersVisible(state: ThreeState | null, visible: boolean) {
+  if (!state || state.helperLayer.visible === visible) {
+    return;
+  }
+  state.helperLayer.visible = visible;
+  state.needsRender = true;
 }
 
 function formatMeasure(value: number) {

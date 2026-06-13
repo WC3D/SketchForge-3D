@@ -84,6 +84,7 @@ export type TransformOverlayProps = {
   editingRotation: EditingRotation;
   rotationReadout: RotationReadout;
   showRotationWheel: boolean;
+  hideSelectionChrome: boolean;
   hideDimensionMarks: boolean;
   rotationWheelAxis: RotationAxis;
   pinnedRotationWheelView: PinnedRotationWheelView | null;

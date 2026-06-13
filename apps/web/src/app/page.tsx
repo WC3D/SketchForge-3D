@@ -3,7 +3,8 @@
 import { Clock3, FileUp, Grid3X3, HomeIcon, List, Plus, Search, Settings, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SketchForgeEditor, importedShapeFromStl } from "@/components/SketchForgeEditor";
-import type { WorkplaneShape } from "@/types/sketchforge";
+import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
+import type { GridSize, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type AppView = "dashboard" | "editor";
 type ViewMode = "grid" | "list";
@@ -19,6 +20,8 @@ type DashboardProject = {
   thumbnailUrl?: string | null;
   thumbnailVersion?: number;
   revision?: number;
+  workspace?: WorkplaneWorkspaceSettings;
+  snapGrid?: GridSize;
 };
 
 type StoredDashboardProject = Partial<DashboardProject> & {
@@ -145,6 +148,8 @@ function readStoredProjects() {
           thumbnailUrl: typeof project.thumbnailUrl === "string" ? project.thumbnailUrl : null,
           thumbnailVersion: typeof project.thumbnailVersion === "number" ? project.thumbnailVersion : undefined,
           revision,
+          workspace: normalizeWorkspaceSettings(project.workspace),
+          snapGrid: normalizeSnapGrid(project.snapGrid),
         };
       });
     return { projects, legacyShapes };
@@ -173,6 +178,8 @@ function mergeProjectForStorage(project: DashboardProject, storedProject?: Dashb
     thumbnailUrl: project.thumbnailUrl ?? storedProject.thumbnailUrl,
     thumbnailVersion: project.thumbnailVersion ?? storedProject.thumbnailVersion,
     updatedAt: Math.max(project.updatedAt, storedProject.updatedAt),
+    workspace: project.workspace ?? storedProject.workspace,
+    snapGrid: project.snapGrid ?? storedProject.snapGrid,
   };
 }
 
@@ -187,6 +194,8 @@ function projectForStorage(project: DashboardProject): DashboardProject {
     thumbnailUrl: project.thumbnailUrl ?? null,
     thumbnailVersion: project.thumbnailVersion,
     revision: project.revision,
+    workspace: normalizeWorkspaceSettings(project.workspace),
+    snapGrid: normalizeSnapGrid(project.snapGrid),
   };
 }
 
@@ -206,6 +215,8 @@ function newProject(name: string, index: number, shapeCount = 0): DashboardProje
     shapes: shapeCount,
     accent: PROJECT_ACCENTS[index % PROJECT_ACCENTS.length],
     revision: now,
+    workspace: DEFAULT_WORKPLANE_WORKSPACE,
+    snapGrid: DEFAULT_SNAP_GRID,
   };
 }
 
@@ -423,6 +434,24 @@ export default function Home() {
       });
   }, []);
 
+  const updateProjectWorkspace = useCallback((snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
+    const version = Date.now();
+    const workspace = normalizeWorkspaceSettings(snapshot.workspace);
+    const snapGrid = normalizeSnapGrid(snapshot.snap);
+    setProjects((current) =>
+      current.map((project) =>
+        project.id === snapshot.projectId
+          ? {
+              ...project,
+              workspace,
+              snapGrid,
+              updatedAt: version,
+            }
+          : project,
+      ),
+    );
+  }, []);
+
   const createAndOpenProject = (name?: string) => {
     const project = newProject(name ?? `Untitled design ${projects.length + 1}`, projects.length);
     setProjectShapesById((current) => ({
@@ -511,6 +540,8 @@ export default function Home() {
     shapes: project.shapes,
     designShapes: projectShapesById[project.id]?.shapes.length ?? null,
     thumbnail: Boolean(project.thumbnailUrl),
+    workspace: Boolean(project.workspace),
+    snapGrid: project.snapGrid ?? null,
   }));
 
   return (
@@ -559,9 +590,12 @@ export default function Home() {
         <div className={view === "editor" ? "editor-stage active" : "editor-stage"} aria-hidden={view !== "editor"}>
           <SketchForgeEditor
             initialShapes={activeProjectShapeEntry?.shapes ?? []}
+            initialSnap={activeProject?.snapGrid ?? DEFAULT_SNAP_GRID}
+            initialWorkspace={activeProject?.workspace ?? DEFAULT_WORKPLANE_WORKSPACE}
             onHome={openDashboard}
             onProjectShapesChange={updateProjectShapes}
             onProjectSnapshot={updateProjectSnapshot}
+            onProjectWorkspaceChange={updateProjectWorkspace}
             projectId={activeProjectId}
             projectRevision={activeProjectShapeEntry?.revision ?? activeProject?.revision ?? 0}
           />

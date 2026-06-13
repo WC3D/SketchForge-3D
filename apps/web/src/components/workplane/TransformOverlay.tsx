@@ -28,6 +28,7 @@ export function TransformOverlay({
   editingRotation,
   rotationReadout,
   showRotationWheel,
+  hideSelectionChrome,
   hideDimensionMarks,
   rotationWheelAxis,
   pinnedRotationWheelView,
@@ -74,7 +75,7 @@ export function TransformOverlay({
   const plane = pinnedWheel?.plane ?? box.rotationPlanes[rotationWheelAxis];
   const wheel = pinnedWheel?.wheel ?? box.rotationWheels[rotationWheelAxis] ?? box.rotationWheel;
   return (
-    <div className="transform-overlay" aria-hidden="true">
+    <div className={`transform-overlay ${hideSelectionChrome ? "hide-selection-chrome" : ""}`} aria-hidden="true">
       {showRotationWheel && wheel && plane ? (
         <svg
           className={`rotation-protractor-plane axis-${rotationWheelAxis}`}
