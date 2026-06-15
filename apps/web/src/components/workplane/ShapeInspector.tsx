@@ -66,6 +66,8 @@ type SelectPropertyConfig = {
 };
 
 type ShapePropertyConfig = RangePropertyConfig | TextPropertyConfig | SelectPropertyConfig;
+export type ShapeInspectorUpdateOptions = { resizeAxis?: "width" | "depth" | "height" };
+type ShapeInspectorUpdate = (patch: Partial<WorkplaneShape>, options?: ShapeInspectorUpdateOptions) => void;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -75,16 +77,17 @@ function formatPanelNumber(value: number) {
   return (Math.abs(value) < 0.005 ? 0 : value).toFixed(2);
 }
 
-function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<WorkplaneShape>) => void): ShapePropertyConfig[] {
+function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdate): ShapePropertyConfig[] {
   const width = shapeWidth(shape);
   const depth = shapeDepth(shape);
-  const setWidth = (value: number) => onUpdate({ width: value, size: resizedShapeSize(value, depth) });
-  const setDepth = (value: number) => onUpdate({ depth: value, size: resizedShapeSize(width, value) });
-  const setConeWidth = (value: number) => onUpdate({ width: value, baseRadius: value / 2, size: resizedShapeSize(value, depth) });
+  const setWidth = (value: number) => onUpdate({ width: value, size: resizedShapeSize(value, depth) }, { resizeAxis: "width" });
+  const setDepth = (value: number) => onUpdate({ depth: value, size: resizedShapeSize(width, value) }, { resizeAxis: "depth" });
+  const setConeWidth = (value: number) => onUpdate({ width: value, baseRadius: value / 2, size: resizedShapeSize(value, depth) }, { resizeAxis: "width" });
   const setBaseRadius = (value: number) => {
     const diameter = value * 2;
-    onUpdate({ baseRadius: value, width: diameter, size: resizedShapeSize(diameter, depth) });
+    onUpdate({ baseRadius: value, width: diameter, size: resizedShapeSize(diameter, depth) }, { resizeAxis: "width" });
   };
+  const setHeight = (height: number) => onUpdate({ height }, { resizeAxis: "height" });
 
   if (shape.kind === "box") {
     return [
@@ -92,7 +95,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Steps", value: shape.steps ?? 10, min: 1, max: 64, step: 1, onChange: (steps) => onUpdate({ steps: Math.round(steps) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -103,7 +106,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Segments", value: shape.segments ?? 1, min: 1, max: 24, step: 1, onChange: (segments) => onUpdate({ segments: Math.round(segments) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -112,7 +115,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Steps", value: shape.steps ?? 24, min: 6, max: 64, step: 1, onChange: (steps) => onUpdate({ steps: Math.round(steps) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -121,7 +124,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Steps", value: shape.steps ?? 32, min: 6, max: 64, step: 1, onChange: (steps) => onUpdate({ steps: Math.round(steps) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -131,7 +134,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Base Radius", value: shape.baseRadius ?? width / 2, min: MIN_SHAPE_SIZE, max: 80, onChange: setBaseRadius },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setConeWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
       { label: "Sides", value: shape.sides ?? 96, min: 3, max: 128, step: 1, onChange: (sides) => onUpdate({ sides: Math.round(sides) }) },
     ];
   }
@@ -141,7 +144,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Sides", value: shape.sides ?? 4, min: 3, max: 24, step: 1, onChange: (sides) => onUpdate({ sides: Math.round(sides) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -150,7 +153,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Sides", value: shape.sides ?? 64, min: 4, max: 128, step: 1, onChange: (sides) => onUpdate({ sides: Math.round(sides) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -159,7 +162,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
       { label: "Thickness", value: shape.bevel ?? 4, min: 0.5, max: 20, onChange: (bevel) => onUpdate({ bevel }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
     ];
   }
 
@@ -176,7 +179,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
         },
       },
       { type: "select", label: "Font", value: shape.font ?? "Multilanguage", options: TEXT_FONT_OPTIONS, onChange: (font) => onUpdate({ font }) },
-      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 40, onChange: (height) => onUpdate({ height }) },
+      { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 40, onChange: setHeight },
       { label: "Bevel", value: shape.bevel ?? 0, min: 0, max: 8, onChange: (bevel) => onUpdate({ bevel }) },
       { label: "Segments", value: shape.segments ?? 0, min: 0, max: 24, step: 1, onChange: (segments) => onUpdate({ segments: Math.round(segments) }) },
     ];
@@ -185,7 +188,7 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: (patch: Partial<Wor
   return [
     { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
     { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
-    { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: (height) => onUpdate({ height }) },
+    { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
   ];
 }
 
@@ -201,7 +204,7 @@ export function ShapeInspector({
   shape: WorkplaneShape;
   snap: GridSize;
   snapOpen: boolean;
-  onUpdate: (patch: Partial<WorkplaneShape>) => void;
+  onUpdate: ShapeInspectorUpdate;
   onClose: () => void;
   onSnapChange: Dispatch<SetStateAction<GridSize>>;
   onSnapOpenChange: Dispatch<SetStateAction<boolean>>;

@@ -14,7 +14,7 @@ import gentilisBoldFontJson from "three/examples/fonts/gentilis_bold.typeface.js
 import helvetikerBoldFontJson from "three/examples/fonts/helvetiker_bold.typeface.json";
 import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json";
 import { AlignOverlay, MirrorOverlay, type AlignOverlayState, type MirrorOverlayState } from "@/components/workplane/ActionOverlays";
-import { ShapeInspector, SnapGridControl } from "@/components/workplane/ShapeInspector";
+import { ShapeInspector, SnapGridControl, type ShapeInspectorUpdateOptions } from "@/components/workplane/ShapeInspector";
 import { WorkspaceSettingsModal } from "@/components/workplane/WorkspaceSettingsModal";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
 import { cleanNearZero, cleanRotationDegrees, fallbackSolidColor, mirroredAxisCount, mirrorSign, proportionalResizeScale, resizedShapeSize, shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
@@ -212,6 +212,12 @@ type RotationHandleSide = "near" | "right" | "far" | "left";
 type RotationHandleSides = Record<RotationAxis, RotationHandleSide>;
 type ShapeUpdatePatch = Partial<WorkplaneShape> & { bakeTransform?: boolean };
 type ResizeSigns = { x: number; z: number };
+type ResizeAnchorMemory = {
+  shapeId: string;
+  handleKey: string;
+  signs: ResizeSigns;
+  pressedY: "top" | "bottom" | null;
+};
 type TransformDragState = {
   id: string;
   ids: string[];
@@ -710,7 +716,7 @@ function projectedWorldYForScreenY(state: ThreeState, shape: WorkplaneShape, tar
   return nextWorldY;
 }
 
-function patchWithPreservedWorldBottom(shape: WorkplaneShape, patch: Partial<WorkplaneShape>) {
+function patchWithPreservedWorldYEdge(shape: WorkplaneShape, patch: Partial<WorkplaneShape>, edge: "bottom" | "top") {
   const startFrame = selectionFrameForShapes([shape], [shape.id]);
   if (!startFrame) {
     return patch;
@@ -722,10 +728,55 @@ function patchWithPreservedWorldBottom(shape: WorkplaneShape, patch: Partial<Wor
     return patch;
   }
   const draftBounds = selectionWorldYBounds(draftFrame);
+  const delta = edge === "bottom" ? startBounds.min - draftBounds.min : startBounds.max - draftBounds.max;
   return {
     ...patch,
-    elevation: cleanNearZero(clamp((draftShape.elevation ?? 0) + startBounds.min - draftBounds.min, MIN_ELEVATION, MAX_ELEVATION), 0.0005),
+    elevation: cleanNearZero(clamp((draftShape.elevation ?? 0) + delta, MIN_ELEVATION, MAX_ELEVATION), 0.0005),
   };
+}
+
+function patchWithPreservedWorldBottom(shape: WorkplaneShape, patch: Partial<WorkplaneShape>) {
+  return patchWithPreservedWorldYEdge(shape, patch, "bottom");
+}
+
+function resizeSignsForDimension(signs: ResizeSigns, axis: "width" | "depth") {
+  return axis === "width" ? { x: signs.x, z: 0 } : { x: 0, z: signs.z };
+}
+
+function patchWithResizeAnchor(
+  shape: WorkplaneShape,
+  patch: Partial<WorkplaneShape>,
+  axis: ShapeInspectorUpdateOptions["resizeAxis"] | DimensionMark["axis"],
+  anchor: ResizeAnchorMemory | null,
+) {
+  if (axis === "height") {
+    return patchWithPreservedWorldYEdge(shape, patch, anchor?.shapeId === shape.id && anchor.pressedY === "bottom" ? "top" : "bottom");
+  }
+
+  if (axis !== "width" && axis !== "depth") {
+    return patchWithPreservedWorldBottom(shape, patch);
+  }
+  if (!anchor || anchor.shapeId !== shape.id) {
+    return patchWithPreservedWorldBottom(shape, patch);
+  }
+
+  const signs = resizeSignsForDimension(anchor.signs, axis);
+  if (!signs.x && !signs.z) {
+    return patchWithPreservedWorldBottom(shape, patch);
+  }
+
+  const frame = selectionFrameForShapes([shape], [shape.id]);
+  if (!frame) {
+    return patchWithPreservedWorldBottom(shape, patch);
+  }
+
+  const width = Math.max(MIN_SHAPE_SIZE, patch.width ?? shapeWidth(shape));
+  const depth = Math.max(MIN_SHAPE_SIZE, patch.depth ?? shapeDepth(shape));
+  const center = resizeCenterFromAnchor(frame, resizeAnchorPointForFrame(frame, signs), signs, width, depth);
+  return patchWithPreservedWorldBottom(shape, {
+    ...patch,
+    ...resizedShapePatchFromFrame(shape, center, width, depth),
+  });
 }
 
 function resizeShapeFromFrameHandle(
@@ -900,6 +951,7 @@ export function WorkplaneViewport({
   const dragRef = useRef<DragState | null>(null);
   const marqueeRef = useRef<MarqueeState | null>(null);
   const transformRef = useRef<TransformDragState | null>(null);
+  const lastResizeAnchorRef = useRef<ResizeAnchorMemory | null>(null);
   const suppressNextLiftEditRef = useRef(false);
   const snapRef = useRef(snap);
   const workspaceRef = useRef(workspace);
@@ -926,6 +978,24 @@ export function WorkplaneViewport({
 
   const placementElevationRef = useRef(placementElevation);
   const workplaneModeRef = useRef(workplaneMode);
+
+  const rememberResizeAnchor = useCallback((shapeId: string, kind: TransformHandleKind, handleKey: string) => {
+    if (kind === "scale") {
+      const signs = resizeSignsForHandle(handleKey);
+      if (signs.x || signs.z) {
+        lastResizeAnchorRef.current = { shapeId, handleKey, signs, pressedY: null };
+      }
+      return;
+    }
+    if (kind === "height") {
+      lastResizeAnchorRef.current = {
+        shapeId,
+        handleKey,
+        signs: { x: 0, z: 0 },
+        pressedY: handleKey === "bottom-height" ? "bottom" : "top",
+      };
+    }
+  }, []);
 
   useEffect(() => {
     const nextKey = workspaceSettingsKey ?? null;
@@ -985,6 +1055,7 @@ export function WorkplaneViewport({
     const nextSelectedIdsKey = selectedIds.join("|");
     if (nextSelectedIdsKey !== selectedIdsKeyRef.current) {
       selectedIdsKeyRef.current = nextSelectedIdsKey;
+      lastResizeAnchorRef.current = null;
       setHoverMeasureKey(null);
       setPinnedMeasureKey(null);
       setEditingDimension(null);
@@ -1256,6 +1327,7 @@ export function WorkplaneViewport({
       if (kind === "scale" && !scaleStartPoint) {
         return;
       }
+      rememberResizeAnchor(shape.id, kind, resizeHandleKey);
       event.preventDefault();
       event.stopPropagation();
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -1335,7 +1407,7 @@ export function WorkplaneViewport({
       }
       onInteractionActiveChange?.(true);
     },
-    [onInteractionActiveChange, toRawPlanePoint],
+    [onInteractionActiveChange, rememberResizeAnchor, toRawPlanePoint],
   );
 
   const updateTransform = useCallback(
@@ -1522,9 +1594,13 @@ export function WorkplaneViewport({
   }, [onInteractionActiveChange, onUpdateShape, suppressLiftEditAfterDrag]);
 
   const beginDimensionEdit = useCallback((mark: DimensionMark) => {
+    const id = selectedIdsRef.current[0];
+    if (id && (mark.axis === "width" || mark.axis === "depth" || mark.axis === "height")) {
+      rememberResizeAnchor(id, mark.axis === "height" ? "height" : "scale", mark.handleKey);
+    }
     setPinnedMeasureKey(mark.handleKey);
     setEditingDimension({ key: mark.key, axis: mark.axis, x: mark.labelX, y: mark.labelY, value: mark.label });
-  }, []);
+  }, [rememberResizeAnchor]);
 
   const beginLiftEdit = useCallback((handleKey: string, x: number, y: number) => {
     if (suppressNextLiftEditRef.current) {
@@ -1585,11 +1661,11 @@ export function WorkplaneViewport({
         if (shape.kind === "cone") {
           patch.baseRadius = nextValue / 2;
         }
-        onUpdateShape(id, patchWithPreservedWorldBottom(shape, patch));
+        onUpdateShape(id, patchWithResizeAnchor(shape, patch, edit.axis, lastResizeAnchorRef.current));
       } else if (edit.axis === "depth") {
-        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { depth: nextValue, size: resizedShapeSize(shapeWidth(shape), nextValue) }));
+        onUpdateShape(id, patchWithResizeAnchor(shape, { depth: nextValue, size: resizedShapeSize(shapeWidth(shape), nextValue) }, edit.axis, lastResizeAnchorRef.current));
       } else {
-        onUpdateShape(id, patchWithPreservedWorldBottom(shape, { height: nextValue }));
+        onUpdateShape(id, patchWithResizeAnchor(shape, { height: nextValue }, edit.axis, lastResizeAnchorRef.current));
       }
     }
     setEditingDimension(null);
@@ -1752,6 +1828,7 @@ export function WorkplaneViewport({
         const rotationCenter = handle.kind === "rotate" ? wheel ?? projectToScreen(pivot, state) : undefined;
         const rotationStartPoint = handle.kind === "rotate" ? rayPointOnRotationPlane(state, event.clientX, event.clientY, rotationPlaneCenter, axisVector) : null;
         const rotationStartVector = rotationStartPoint ? rotationStartPoint.sub(rotationPlaneCenter) : undefined;
+        rememberResizeAnchor(handle.id, handle.kind, resizeHandleKey);
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         setEditingRotation(null);
@@ -2088,7 +2165,7 @@ export function WorkplaneViewport({
       }
       onInteractionActiveChange?.(false);
     },
-    [onInteractionActiveChange, onSelectShape, onUpdateShape, setMarqueeFromState, shapesInMarquee, suppressLiftEditAfterDrag],
+    [onInteractionActiveChange, onSelectShape, onUpdateShape, rememberResizeAnchor, setMarqueeFromState, shapesInMarquee, suppressLiftEditAfterDrag],
   );
 
   const handleDrop = useCallback(
@@ -2247,7 +2324,7 @@ export function WorkplaneViewport({
           shape={selectedShape}
           snap={snap}
           snapOpen={snapOpen}
-          onUpdate={(patch) => onUpdateShape(selectedShape.id, patch)}
+          onUpdate={(patch, options) => onUpdateShape(selectedShape.id, patchWithResizeAnchor(selectedShape, patch, options?.resizeAxis, lastResizeAnchorRef.current))}
           onClose={() => onSelectShape(null)}
           onSnapChange={setSnap}
           onSnapOpenChange={setSnapOpen}
