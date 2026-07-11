@@ -77,6 +77,7 @@ import {
   type SketchForgeMcpViewFace,
 } from "@/lib/sketchforgeMcpProtocol";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
+import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 export { importedShapeFromStl, importedShapeFromSvg };
@@ -392,6 +393,51 @@ function shapeFromSketchProfile(profile: SketchProfile, height: number, existing
     },
     sketchProfile: cloneSketchProfile(profile),
   } satisfies WorkplaneShape);
+}
+
+async function cadShapeFromSketchProfile(profile: SketchProfile, height: number, existing?: WorkplaneShape | null) {
+  const safeHeight = Math.max(MIN_SHAPE_DIMENSION, height);
+  const worker = new Worker(new URL("../workers/sketchCad.worker.ts", import.meta.url), { type: "module" });
+  try {
+    const response = await new Promise<SketchCadBuildResponse>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error("OpenCascade timed out while building the sketch")), 30_000);
+      worker.onmessage = (event: MessageEvent<SketchCadBuildResponse>) => {
+        window.clearTimeout(timer);
+        resolve(event.data);
+      };
+      worker.onerror = () => {
+        window.clearTimeout(timer);
+        reject(new Error("The OpenCascade sketch worker failed to start"));
+      };
+      worker.postMessage({ type: "build", requestId: 1, profile: cloneSketchProfile(profile), height: safeHeight });
+    });
+    if (response.type === "error") throw new Error(response.message);
+    const source = canonicalizeShape({
+      ...(existing ?? {
+        id: createLocalId("sketch-extrusion"),
+        name: "Sketch extrusion",
+        kind: "mesh" as const,
+        color: "#d41721",
+        x: 0,
+        z: 0,
+        size: 1,
+        width: 1,
+        depth: 1,
+        height: safeHeight,
+        rotation: 0,
+      }),
+      sketchProfile: cloneSketchProfile(profile),
+      edgeTreatments: undefined,
+      edgeTreatmentHistory: undefined,
+      cadDisplayEdges: undefined,
+      cadDisplayEdgesVersion: undefined,
+    });
+    const shape = shapeFromCadMesh(source, response.positions, response.normals, response.indices, response.brep);
+    if (!shape) throw new Error("OpenCascade returned an empty sketch solid");
+    return { ...shape, sketchProfile: cloneSketchProfile(profile) };
+  } finally {
+    worker.terminate();
+  }
 }
 
 function cleanModelDimension(value: number) {
@@ -6019,19 +6065,20 @@ export function SketchForgeEditor({
     setSketchTool("select");
   }, [commitSketchProfile, sketchProfile]);
 
-  const finishSketch = useCallback(() => {
+  const finishSketch = useCallback(async () => {
     const existing = editingSketchShapeId ? shapes.find((shape) => shape.id === editingSketchShapeId) ?? null : null;
     const height = existing?.height ?? 10;
-    const extruded = shapeFromSketchProfile(sketchProfile, height, existing);
-    if (!extruded) {
-      setNotice("Close at least one profile before finishing the sketch");
-      return;
+    setNotice("Building exact sketch geometry…");
+    try {
+      const extruded = await cadShapeFromSketchProfile(sketchProfile, height, existing);
+      const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
+      commitShapes(nextShapes, extruded.id, existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height");
+      setSketchActive(false);
+      setEditingSketchShapeId(null);
+      setToolbarMode("geometry");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "OpenCascade could not build this sketch");
     }
-    const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
-    commitShapes(nextShapes, extruded.id, existing ? "Sketch updated" : "Sketch created at 10 mm height");
-    setSketchActive(false);
-    setEditingSketchShapeId(null);
-    setToolbarMode("geometry");
   }, [commitShapes, editingSketchShapeId, shapes, sketchProfile]);
 
   useEffect(() => {
