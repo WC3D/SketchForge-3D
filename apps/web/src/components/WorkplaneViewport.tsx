@@ -37,6 +37,11 @@ import {
 } from "@/components/workplane/TransformOverlay";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, MeasurementAccuracy, ShapeAsset, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import type { CadModifierEdge } from "@/lib/cadModifierTypes";
+import { defaultThemes, type AppTheme } from "@/lib/themes";
+
+// Module-level theme reference updated by the WorkplaneViewport component.
+// Helper functions reference this to avoid thread-per-call theme parameters.
+let activeThemeRef: AppTheme = defaultThemes.light;
 
 const WORKPLANE_WIDTH = 200;
 const WORKPLANE_DEPTH = 140;
@@ -133,6 +138,8 @@ type WorkplaneViewportProps = {
   mirrorReferenceShapes: WorkplaneShape[];
   placementElevation: number;
   workplaneMode: boolean;
+  theme?: AppTheme;
+  externalWorkspace?: WorkplaneWorkspaceSettings;
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   workspaceSettingsKey?: string | null;
@@ -1147,6 +1154,8 @@ export function WorkplaneViewport({
   mirrorReferenceShapes,
   placementElevation,
   workplaneMode,
+  theme = defaultThemes.light,
+  externalWorkspace,
   initialSnap,
   initialWorkspace,
   workspaceSettingsKey,
@@ -1176,7 +1185,7 @@ export function WorkplaneViewport({
   const [snapOpen, setSnapOpen] = useState(false);
   const [snap, setSnap] = useState<GridSize>(() => normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<WorkspaceSettings>(() => normalizeWorkspaceSettings(initialWorkspace));
+  const [workspace, setWorkspace] = useState<WorkspaceSettings>(() => normalizeWorkspaceSettings(initialWorkspace ?? externalWorkspace));
   const [transformOverlay, setTransformOverlay] = useState<TransformOverlayState | null>(null);
   const [alignOverlay, setAlignOverlay] = useState<AlignOverlayState | null>(null);
   const [mirrorOverlay, setMirrorOverlay] = useState<MirrorOverlayState | null>(null);
@@ -1205,7 +1214,7 @@ export function WorkplaneViewport({
   const lastResizeAnchorRef = useRef<ResizeAnchorMemory | null>(null);
   const suppressNextLiftEditRef = useRef(false);
   const snapRef = useRef(snap);
-  const workspaceRef = useRef(workspace);
+  const workspaceRef = useRef(normalizeWorkspaceSettings(initialWorkspace ?? externalWorkspace));
   const workspaceSettingsKeyRef = useRef(workspaceSettingsKey ?? null);
   const lastWorkspaceSettingsSyncRef = useRef("");
   const viewCubeRef = useRef<HTMLDivElement | null>(null);
@@ -1238,6 +1247,21 @@ export function WorkplaneViewport({
     (ids = selectedIdsRef.current) => (modifierActiveRef.current && !modifierPreviewActiveRef.current ? [] : ids),
     [],
   );
+
+  // Keep module-level theme reference in sync with prop
+  useEffect(() => {
+    activeThemeRef = theme;
+  }, [theme]);
+
+  // When the active theme's viewport background changes (theme switch or custom
+  // theme edit), sync workspace.background so rebuildWorkplane applies the correct
+  // scene background and grid colors.
+  const prevVpBgRef = useRef(theme.viewport.background);
+  useEffect(() => {
+    if (prevVpBgRef.current === theme.viewport.background) return;
+    prevVpBgRef.current = theme.viewport.background;
+    setWorkspace((prev) => ({ ...prev, background: theme.viewport.background }));
+  }, [theme.viewport.background]);
 
   useEffect(() => {
     modifierEdgesRef.current = modifierEdges;
@@ -3025,7 +3049,7 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
   host.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color("#f8fbfc");
+  scene.background = new THREE.Color(activeThemeRef.viewport.background);
 
   const camera = new THREE.PerspectiveCamera(38, host.clientWidth / Math.max(1, host.clientHeight), 0.1, 6000);
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -3229,15 +3253,17 @@ function rebuildWorkplane(state: ThreeState | null, workspace: WorkspaceSettings
   state.workplaneLayer.add(base);
 
   if (workspace.showGrid) {
-    state.workplaneLayer.add(createGridLines(workspace.width, workspace.depth, workspace.gridBlockSize));
+    const grid = createGridLines(workspace.width, workspace.depth, workspace.gridBlockSize);
+    grid.name = "GridLines";
+    state.workplaneLayer.add(grid);
   }
 }
 
 function createGridLines(width = WORKPLANE_WIDTH, depth = WORKPLANE_DEPTH, blockSize = DEFAULT_WORKSPACE.gridBlockSize) {
   const group = new THREE.Group();
-  const minor = new THREE.LineBasicMaterial({ color: "#91dff0", transparent: true, opacity: 0.55 });
-  const major = new THREE.LineBasicMaterial({ color: "#4bbddf", transparent: true, opacity: 0.7 });
-  const axis = new THREE.LineBasicMaterial({ color: "#34aad2", transparent: true, opacity: 0.88 });
+  const minor = new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.gridMinor, transparent: true, opacity: 0.55 });
+  const major = new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.gridMajor, transparent: true, opacity: 0.7 });
+  const axis = new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.gridAxis, transparent: true, opacity: 0.88 });
   const minorPoints: number[] = [];
   const majorPoints: number[] = [];
   const axisPoints: number[] = [];
@@ -3264,7 +3290,7 @@ function createGridLines(width = WORKPLANE_WIDTH, depth = WORKPLANE_DEPTH, block
     pushLine(points, [-width / 2, 0.04, centeredZ], [width / 2, 0.04, centeredZ]);
   }
 
-  const border = new THREE.LineBasicMaterial({ color: "#58c5e6", transparent: true, opacity: 0.9 });
+  const border = new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.gridBorder, transparent: true, opacity: 0.9 });
   pushLine(borderPoints, [-width / 2, 0.08, -depth / 2], [width / 2, 0.08, -depth / 2]);
   pushLine(borderPoints, [width / 2, 0.08, -depth / 2], [width / 2, 0.08, depth / 2]);
   pushLine(borderPoints, [width / 2, 0.08, depth / 2], [-width / 2, 0.08, depth / 2]);
@@ -3522,7 +3548,7 @@ function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selec
 function modifierEdgeMaterialStyle(active: boolean, hovered: boolean, previewActive: boolean) {
   const subduedSelectedPreviewEdge = previewActive && active && !hovered;
   return {
-    color: active ? (hovered ? "#ffbf45" : "#ff8a1d") : hovered ? "#84edff" : "#17b7e5",
+    color: active ? (hovered ? activeThemeRef.viewport.handleHover : activeThemeRef.viewport.handleActive) : hovered ? activeThemeRef.viewport.handleHoverAlt : activeThemeRef.viewport.handleActiveAlt,
     opacity: subduedSelectedPreviewEdge ? 0.18 : active || hovered ? 1 : 0.72,
     linewidth: active || hovered ? 3 : 1,
   };
@@ -4276,7 +4302,7 @@ function createSelectedGroundFootprint(shape: WorkplaneShape) {
   const points = [...footprint, footprint[0].clone()];
   const outline = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
-    new THREE.LineBasicMaterial({ color: "#00aeea", transparent: true, opacity: 0.92 }),
+    new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.handleDefault, transparent: true, opacity: 0.92 }),
   );
   outline.userData.shapeId = shape.id;
   group.add(outline);
@@ -4289,10 +4315,10 @@ function createTransformHandles(box: THREE.Box3, id: string) {
   group.name = "SketchForgeTransformHandles";
   group.userData.shapeId = id;
 
-  const handleMaterial = new THREE.MeshBasicMaterial({ color: "#e8eef1" });
-  const darkMaterial = new THREE.MeshBasicMaterial({ color: "#273849" });
-  const rotateMaterial = new THREE.LineBasicMaterial({ color: "#00aeea", transparent: true, opacity: 0.96 });
-  const dashMaterial = new THREE.LineDashedMaterial({ color: "#2c3339", dashSize: 2.2, gapSize: 2.4, transparent: true, opacity: 0.72 });
+  const handleMaterial = new THREE.MeshBasicMaterial({ color: activeThemeRef.viewport.handleMaterial });
+  const darkMaterial = new THREE.MeshBasicMaterial({ color: activeThemeRef.viewport.darkMaterial });
+  const rotateMaterial = new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.handleDefault, transparent: true, opacity: 0.96 });
+  const dashMaterial = new THREE.LineDashedMaterial({ color: activeThemeRef.viewport.dashMaterial, dashSize: 2.2, gapSize: 2.4, transparent: true, opacity: 0.72 });
   const handleGeometry = new THREE.BoxGeometry(2.6, 2.6, 2.6);
   const dotGeometry = new THREE.BoxGeometry(1.7, 1.7, 1.7);
   const coneGeometry = new THREE.ConeGeometry(1.7, 3.4, 18);
@@ -4326,7 +4352,7 @@ function createTransformHandles(box: THREE.Box3, id: string) {
     handle.userData.transformHandleKey = key;
     handle.userData.transformPlaneY = point.y;
     group.add(handle);
-    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(handleGeometry), new THREE.LineBasicMaterial({ color: "#2d3439", transparent: true, opacity: 0.86 }));
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(handleGeometry), new THREE.LineBasicMaterial({ color: activeThemeRef.viewport.dashMaterial, transparent: true, opacity: 0.86 }));
     outline.position.copy(point);
     outline.userData.shapeId = id;
     outline.userData.transformHandle = handle.userData.transformHandle;
@@ -4412,7 +4438,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
     shape.groupedShapes
       .filter((child) => !child.hidden)
       .forEach((child) => {
-        const childShape = shape.hole ? { ...child, hole: true, color: "#b8c2cc" } : child;
+        const childShape = shape.hole ? { ...child, hole: true, color: activeThemeRef.viewport.hole } : child;
         const childObject = createShapeObject(childShape, showEdges, onTextureReady);
         content.add(childObject);
       });
@@ -4432,7 +4458,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
   }
 
   const material = new THREE.MeshStandardMaterial({
-    color: shape.hole ? "#b7c0c9" : shape.color,
+    color: shape.hole ? activeThemeRef.viewport.hole : shape.color,
     transparent: Boolean(shape.hole),
     opacity: shape.hole ? (shape.importedMesh ? 0.34 : 0.52) : 1,
     roughness: shape.hole ? 0.88 : 0.57,
@@ -4610,7 +4636,7 @@ function addMesh(
   if ((group.userData.showEdges || complexEdges) && !skipHeavyImportedEdges) {
     const selectedOutline = Boolean(group.userData.showEdges);
     const selectedRoundedBox = selectedOutline && shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);
-    const edgeColor = selectedOutline ? "#00aeea" : shape.hole ? "#697989" : complexEdges ? "#141b21" : darkenHex(shape.color, 0.34);
+    const edgeColor = selectedOutline ? activeThemeRef.viewport.handleDefault : shape.hole ? activeThemeRef.viewport.holeEdge : complexEdges ? activeThemeRef.viewport.complexEdge : darkenHex(shape.color, 0.34);
     const edgeOpacity = selectedRoundedBox ? 0 : selectedOutline ? 0.98 : shape.hole ? 0.44 : complexEdges ? 0.38 : shape.kind === "text" ? 0.86 : 0.2;
     if (selectedOutline && shape.importedMesh && shape.cadDisplayEdgesVersion === 2 && Boolean(shape.cadDisplayEdges?.length)) {
       addCadDisplayEdges(group, shape, edgeColor, edgeOpacity);
@@ -4626,7 +4652,7 @@ function addMesh(
   }
 }
 
-function addCadDisplayEdges(group: THREE.Group, shape: WorkplaneShape, color: string, opacity: number) {
+function addCadDisplayEdges(group: THREE.Group, shape: WorkplaneShape, color: string, opacity: number, theme: AppTheme = defaultThemes.light) {
   if (!shape.cadDisplayEdges?.length) return;
   const material = new THREE.LineBasicMaterial({ color, depthWrite: false, transparent: true, opacity });
   shape.cadDisplayEdges.forEach((edge) => {

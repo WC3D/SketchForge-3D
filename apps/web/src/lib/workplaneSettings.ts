@@ -1,5 +1,6 @@
 import type { GridSize, MeasurementAccuracy, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import { normalizeScaleForUnits } from "@/lib/measurementUnits";
+import type { AppTheme } from "@/lib/themes";
 
 export const DEFAULT_SNAP_GRID: GridSize = "1.0 mm";
 
@@ -41,9 +42,21 @@ export function normalizeSnapGrid(value: unknown, fallback: GridSize = DEFAULT_S
   return snapGridOptions.includes(value as GridSize) ? (value as GridSize) : fallback;
 }
 
+function themeOrDefault(value: unknown, fallback: AppTheme | undefined): AppTheme | undefined {
+  if (!value || typeof value !== "object") return fallback;
+  const t = value as Record<string, unknown>;
+  if (typeof t.id !== "string" || typeof t.name !== "string" || !t.ui || typeof t.ui !== "object" || !t.viewport || typeof t.viewport !== "object") {
+    return fallback;
+  }
+  return value as AppTheme;
+}
+
+const VALID_THEME_IDS = new Set(["light", "dark", "solidworks", "inventor", "custom"]);
+
 export function normalizeWorkspaceSettings(value: unknown, fallback: WorkplaneWorkspaceSettings = DEFAULT_WORKPLANE_WORKSPACE): WorkplaneWorkspaceSettings {
   const candidate = value && typeof value === "object" ? (value as Partial<WorkplaneWorkspaceSettings>) : {};
   const units = stringOrDefault(candidate.units, fallback.units);
+  const themeId = VALID_THEME_IDS.has(candidate.themeId ?? "") ? candidate.themeId : fallback.themeId ?? "light";
   return {
     width: numberOrDefault(candidate.width, fallback.width),
     depth: numberOrDefault(candidate.depth, fallback.depth),
@@ -51,6 +64,8 @@ export function normalizeWorkspaceSettings(value: unknown, fallback: WorkplaneWo
     gridBlockSize: numberOrDefault(candidate.gridBlockSize, fallback.gridBlockSize),
     gridBlockPreset: stringOrDefault(candidate.gridBlockPreset, fallback.gridBlockPreset),
     background: stringOrDefault(candidate.background, fallback.background),
+    themeId,
+    customTheme: themeOrDefault(candidate.customTheme, fallback.customTheme),
     showShadows: booleanOrDefault(candidate.showShadows, fallback.showShadows),
     showGrid: booleanOrDefault(candidate.showGrid, fallback.showGrid),
     cruiseShapes: booleanOrDefault(candidate.cruiseShapes, fallback.cruiseShapes),

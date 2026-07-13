@@ -46,8 +46,22 @@ const PROJECT_SHAPES_DB_NAME = "sketchForge.projectShapes";
 const PROJECT_SHAPES_STORE_NAME = "projectShapes";
 const DOWNLOAD_MODE_STORAGE_KEY = "sketchForge.downloadMode";
 const DOWNLOAD_FOLDER_STORAGE_KEY = "sketchForge.downloadFolder";
+const THEME_STORAGE_KEY = "sketchForge.defaultTheme";
 const PROJECT_ACCENTS: DashboardProject["accent"][] = ["cyan", "green", "gold", "red"];
 const STATIC_EXPORT_BUILD = process.env.NEXT_PUBLIC_STATIC_EXPORT === "true";
+
+function readSavedDefaultTheme(): { themeId?: string; customTheme?: import("@/lib/themes").AppTheme } {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.themeId === "string") {
+      return { themeId: parsed.themeId, customTheme: parsed.customTheme };
+    }
+  } catch {}
+  return {};
+}
 
 function formatUpdated(timestamp: number) {
   const age = Date.now() - timestamp;
@@ -222,6 +236,7 @@ function mergeProjectsForStorage(projects: DashboardProject[]) {
 
 function newProject(name: string, index: number, shapeCount = 0): DashboardProject {
   const now = Date.now();
+  const savedTheme = readSavedDefaultTheme();
   return {
     id: createLocalId("project"),
     name,
@@ -230,7 +245,11 @@ function newProject(name: string, index: number, shapeCount = 0): DashboardProje
     shapes: shapeCount,
     accent: PROJECT_ACCENTS[index % PROJECT_ACCENTS.length],
     revision: now,
-    workspace: DEFAULT_WORKPLANE_WORKSPACE,
+    workspace: {
+      ...DEFAULT_WORKPLANE_WORKSPACE,
+      themeId: savedTheme.themeId,
+      customTheme: savedTheme.customTheme,
+    },
     snapGrid: DEFAULT_SNAP_GRID,
   };
 }

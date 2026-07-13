@@ -1,3 +1,5 @@
+import type { AppTheme } from "@/lib/themes";
+
 export type ShapeKind =
   | "box"
   | "cylinder"
@@ -37,6 +39,8 @@ export type WorkplaneWorkspaceSettings = {
   gridBlockSize: number;
   gridBlockPreset: string;
   background: string;
+  themeId?: string;
+  customTheme?: AppTheme;
   showShadows: boolean;
   showGrid: boolean;
   cruiseShapes: boolean;

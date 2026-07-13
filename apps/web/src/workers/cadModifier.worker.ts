@@ -25,9 +25,9 @@ function post(message: CadModifierWorkerResponse, transfer: Transferable[] = [])
 }
 
 function kernel() {
-  const moduleUrl = "/assets/occt/occt-wasm.js";
+  const moduleUrl = "/occt/occt-wasm.js";
   kernelPromise ??= import(/* webpackIgnore: true */ moduleUrl).then((imported: { default: (options?: { locateFile?: (path: string) => string }) => Promise<unknown> }) => imported.default({
-    locateFile: (path) => path.endsWith(".wasm") ? "/assets/occt/occt-wasm.wasm" : path,
+    locateFile: (path) => path.endsWith(".wasm") ? "/occt/occt-wasm.wasm" : path,
   })).then((module) => {
     const KernelConstructor = OcctKernel as unknown as new (rawModule: unknown) => OcctKernel;
     return new KernelConstructor(module);

@@ -97,7 +97,9 @@ function pointInPolygon(point: { x: number; z: number }, polygon: Array<{ x: num
 }
 
 export function cadSketchRegions(profile: SketchProfile): CadSketchRegion[] {
-  const records = orderedCadSketchPaths(profile)
+  const allPaths = orderedCadSketchPaths(profile);
+  const openCount = allPaths.filter((path) => !path.closed).length;
+  const records = allPaths
     .filter((path) => path.closed)
     .map((path) => {
       const polygon = sampledPath(path);
@@ -105,19 +107,46 @@ export function cadSketchRegions(profile: SketchProfile): CadSketchRegion[] {
     })
     .filter((record) => record.polygon.length >= 3 && record.area > 1e-8)
     .sort((a, b) => b.area - a.area);
-  const regions: CadSketchRegion[] = [];
-  records.forEach((record) => {
-    const sample = record.polygon[0];
-    const parent = records
-      .filter((candidate) => candidate !== record && candidate.area > record.area && pointInPolygon(sample, candidate.polygon))
-      .sort((a, b) => a.area - b.area)[0];
-    if (!parent) {
-      regions.push({ outer: record.path, holes: [] });
-      return;
+
+  // Compute nesting depth: count how many larger closed paths contain each record.
+  // Even depth = solid (outer boundary), odd depth = hole.
+  const depths = records.map((record, index) => {
+    let depth = 0;
+    for (let i = 0; i < records.length; i++) {
+      if (i === index) continue;
+      if (records[i].area > record.area && pointInPolygon(record.polygon[0], records[i].polygon)) {
+        depth++;
+      }
     }
-    const region = regions.find((candidate) => candidate.outer === parent.path);
-    if (region) region.holes.push(record.path);
+    return depth;
   });
+
+  const regions: CadSketchRegion[] = [];
+  records.forEach((record, index) => {
+    const depth = depths[index];
+    if (depth % 2 === 0) {
+      regions.push({ outer: record.path, holes: [] });
+    } else {
+      // Odd depth: find the nearest even-depth ancestor (smallest containing solid)
+      let bestParent: (typeof records)[number] | null = null;
+      for (let i = 0; i < records.length; i++) {
+        if (i === index) continue;
+        if (depths[i] % 2 === 0 && depths[i] < depth && records[i].area > record.area && pointInPolygon(record.polygon[0], records[i].polygon)) {
+          if (!bestParent || records[i].area < bestParent.area) {
+            bestParent = records[i];
+          }
+        }
+      }
+      if (bestParent) {
+        const region = regions.find((r) => r.outer === bestParent!.path);
+        if (region) region.holes.push(record.path);
+      }
+    }
+  });
+
+  if (regions.length === 0 && openCount > 0 && allPaths.length > 0) {
+    throw new Error("All profile paths are open. Close at least one loop before finishing the sketch.");
+  }
   return regions;
 }
 

@@ -53,10 +53,67 @@ describe("OCCT sketch profile preparation", () => {
     expect(regions.every((region) => region.holes.length === 0)).toBe(true);
   });
 
-  it("ignores open paths when preparing CAD regions", () => {
+  it("rejects open paths with a clear error", () => {
     const square = rectangle("open", 0, 0, 10, 10);
     square.segments.pop();
-    expect(cadSketchRegions(profile(square))).toEqual([]);
+    expect(() => cadSketchRegions(profile(square))).toThrow(/open/i);
+  });
+
+  it("creates a solid island inside a hole (3-level nesting)", () => {
+    const regions = cadSketchRegions(profile(
+      rectangle("outer", 0, 0, 40, 40),
+      rectangle("hole", 5, 5, 30, 30),
+      rectangle("island", 12, 12, 16, 16),
+    ));
+    expect(regions).toHaveLength(2);
+    const outerRegion = regions.find((r) => r.outer.id.includes("outer"));
+    const islandRegion = regions.find((r) => r.outer.id.includes("island"));
+    expect(outerRegion).toBeDefined();
+    expect(outerRegion!.holes).toHaveLength(1);
+    expect(outerRegion!.holes[0].id).toContain("hole");
+    expect(islandRegion).toBeDefined();
+    expect(islandRegion!.holes).toHaveLength(0);
+  });
+
+  it("handles 4-level nesting (outer > hole > island > island-hole)", () => {
+    const regions = cadSketchRegions(profile(
+      rectangle("outer", 0, 0, 60, 60),
+      rectangle("hole", 5, 5, 50, 50),
+      rectangle("island", 15, 15, 30, 30),
+      rectangle("ihole", 20, 20, 20, 20),
+    ));
+    const outerRegion = regions.find((r) => r.outer.id.includes("outer"));
+    const islandRegion = regions.find((r) => r.outer.id.includes("island"));
+    expect(outerRegion).toBeDefined();
+    expect(outerRegion!.holes).toHaveLength(1);
+    expect(outerRegion!.holes[0].id).toContain("hole");
+    expect(islandRegion).toBeDefined();
+    expect(islandRegion!.holes).toHaveLength(1);
+    expect(islandRegion!.holes[0].id).toContain("ihole");
+  });
+
+  it("throws when all paths are open", () => {
+    const open1 = rectangle("a", 0, 0, 10, 10);
+    open1.segments.pop();
+    const open2 = rectangle("b", 20, 0, 10, 10);
+    open2.segments.pop();
+    expect(() => cadSketchRegions(profile(open1, open2))).toThrow(/open/i);
+  });
+
+  it("returns empty for a single degenerate zero-area path", () => {
+    const degenerate: SketchProfile = {
+      points: [
+        { id: "d-0", x: 0, z: 0 },
+        { id: "d-1", x: 1, z: 0 },
+        { id: "d-2", x: 0, z: 0 },
+      ],
+      segments: [
+        { id: "d-s0", kind: "line", startId: "d-0", endId: "d-1" },
+        { id: "d-s1", kind: "line", startId: "d-1", endId: "d-2" },
+        { id: "d-s2", kind: "line", startId: "d-2", endId: "d-0" },
+      ],
+    };
+    expect(cadSketchRegions(degenerate)).toEqual([]);
   });
 });
 

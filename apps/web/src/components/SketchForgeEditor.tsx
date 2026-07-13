@@ -79,6 +79,7 @@ import {
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
 import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import { defaultThemes, type AppTheme } from "@/lib/themes";
 
 export { importedShapeFromStl, importedShapeFromSvg };
 
@@ -395,49 +396,72 @@ function shapeFromSketchProfile(profile: SketchProfile, height: number, existing
   } satisfies WorkplaneShape);
 }
 
+let sketchCadWorker: Worker | null = null;
+let sketchCadRequestId = 0;
+const sketchCadPending = new Map<number, {
+  resolve: (response: SketchCadBuildResponse) => void;
+  reject: (error: Error) => void;
+  timer: number;
+}>();
+
+function ensureSketchCadWorker(): Worker {
+  if (sketchCadWorker) return sketchCadWorker;
+  const worker = new Worker(new URL("../workers/sketchCad.worker.ts", import.meta.url), { type: "module" });
+  worker.onmessage = (event: MessageEvent<SketchCadBuildResponse>) => {
+    const pending = sketchCadPending.get(event.data.requestId);
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    sketchCadPending.delete(event.data.requestId);
+    pending.resolve(event.data);
+  };
+  worker.onerror = () => {
+    sketchCadPending.forEach((pending) => {
+      window.clearTimeout(pending.timer);
+      pending.reject(new Error("The OpenCascade sketch worker failed to start"));
+    });
+    sketchCadPending.clear();
+    sketchCadWorker = null;
+  };
+  sketchCadWorker = worker;
+  return worker;
+}
+
 async function cadShapeFromSketchProfile(profile: SketchProfile, height: number, existing?: WorkplaneShape | null) {
   const safeHeight = Math.max(MIN_SHAPE_DIMENSION, height);
-  const worker = new Worker(new URL("../workers/sketchCad.worker.ts", import.meta.url), { type: "module" });
-  try {
-    const response = await new Promise<SketchCadBuildResponse>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error("OpenCascade timed out while building the sketch")), 30_000);
-      worker.onmessage = (event: MessageEvent<SketchCadBuildResponse>) => {
-        window.clearTimeout(timer);
-        resolve(event.data);
-      };
-      worker.onerror = () => {
-        window.clearTimeout(timer);
-        reject(new Error("The OpenCascade sketch worker failed to start"));
-      };
-      worker.postMessage({ type: "build", requestId: 1, profile: cloneSketchProfile(profile), height: safeHeight });
-    });
-    if (response.type === "error") throw new Error(response.message);
-    const source = canonicalizeShape({
-      ...(existing ?? {
-        id: createLocalId("sketch-extrusion"),
-        name: "Sketch extrusion",
-        kind: "mesh" as const,
-        color: "#d41721",
-        x: 0,
-        z: 0,
-        size: 1,
-        width: 1,
-        depth: 1,
-        height: safeHeight,
-        rotation: 0,
-      }),
-      sketchProfile: cloneSketchProfile(profile),
-      edgeTreatments: undefined,
-      edgeTreatmentHistory: undefined,
-      cadDisplayEdges: undefined,
-      cadDisplayEdgesVersion: undefined,
-    });
-    const shape = shapeFromCadMesh(source, response.positions, response.normals, response.indices, response.brep);
-    if (!shape) throw new Error("OpenCascade returned an empty sketch solid");
-    return { ...shape, sketchProfile: cloneSketchProfile(profile) };
-  } finally {
-    worker.terminate();
-  }
+  const worker = ensureSketchCadWorker();
+  const requestId = ++sketchCadRequestId;
+  const response = await new Promise<SketchCadBuildResponse>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      sketchCadPending.delete(requestId);
+      reject(new Error("OpenCascade timed out while building the sketch"));
+    }, 30_000);
+    sketchCadPending.set(requestId, { resolve, reject, timer });
+    worker.postMessage({ type: "build", requestId, profile: cloneSketchProfile(profile), height: safeHeight });
+  });
+  if (response.type === "error") throw new Error(response.message);
+  const source = canonicalizeShape({
+    ...(existing ?? {
+      id: createLocalId("sketch-extrusion"),
+      name: "Sketch extrusion",
+      kind: "mesh" as const,
+      color: "#d41721",
+      x: 0,
+      z: 0,
+      size: 1,
+      width: 1,
+      depth: 1,
+      height: safeHeight,
+      rotation: 0,
+    }),
+    sketchProfile: cloneSketchProfile(profile),
+    edgeTreatments: undefined,
+    edgeTreatmentHistory: undefined,
+    cadDisplayEdges: undefined,
+    cadDisplayEdgesVersion: undefined,
+  });
+  const shape = shapeFromCadMesh(source, response.positions, response.normals, response.indices, response.brep);
+  if (!shape) throw new Error("OpenCascade returned an empty sketch solid");
+  return { ...shape, sketchProfile: cloneSketchProfile(profile) };
 }
 
 function cleanModelDimension(value: number) {
@@ -5197,6 +5221,36 @@ export function SketchForgeEditor({
   const sketchImageInputRef = useRef<HTMLInputElement | null>(null);
   const booleanAutomationRunRef = useRef<string | null>(null);
   const projectHydratingRef = useRef(false);
+
+  const activeTheme = useMemo(() => {
+    if (workspaceSettings.themeId === "custom" && workspaceSettings.customTheme) {
+      return workspaceSettings.customTheme;
+    }
+    return defaultThemes[workspaceSettings.themeId || "light"] || defaultThemes.light;
+  }, [workspaceSettings.themeId, workspaceSettings.customTheme]);
+
+  const themeStyles = useMemo(() => {
+    const vars: Record<string, string> = {};
+    for (const [key, val] of Object.entries(activeTheme.ui)) {
+      const kebab = key.replace(/([a-z0-9]|(?=[A-Z]))([A-Z])/g, '$1-$2').toLowerCase();
+      vars[`--${kebab}`] = val;
+    }
+    return vars;
+  }, [activeTheme]);
+
+  // Persist theme selection to localStorage so new projects inherit it
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        "sketchForge.defaultTheme",
+        JSON.stringify({
+          themeId: workspaceSettings.themeId || "light",
+          customTheme: workspaceSettings.customTheme || null,
+        })
+      );
+    } catch {}
+  }, [workspaceSettings.themeId, workspaceSettings.customTheme]);
   const projectInteractionActiveRef = useRef(false);
   const pendingProjectShapesRef = useRef<WorkplaneShape[] | null>(null);
   const projectSyncTimerRef = useRef<number | null>(null);
@@ -7879,7 +7933,7 @@ export function SketchForgeEditor({
   ]);
 
   return (
-    <div className="sketchforge-editor">
+    <div className="sketchforge-editor" style={themeStyles}>
       <SecondaryToolbar
         toolbarMode={toolbarMode}
         onToolbarModeChange={(mode) => {
@@ -7992,6 +8046,8 @@ export function SketchForgeEditor({
           />
         ) : (
           <WorkplaneViewport
+            theme={activeTheme}
+            externalWorkspace={workspaceSettings}
           shapes={viewportShapes}
           selectedIds={selectedIds}
           alignMode={alignMode}
@@ -8081,6 +8137,8 @@ export function SketchForgeEditor({
       {topPanel ? (
         <TopActionPanel
           panel={topPanel}
+          workspace={workspaceSettings}
+          onWorkspaceChange={setWorkspaceSettings}
           shapeCount={exportableShapeCount}
           scopeLabel={exportScopeLabel}
           onClose={() => setTopPanel(null)}
@@ -8571,6 +8629,8 @@ function SecondaryToolbar({
 
 function TopActionPanel({
   panel,
+  workspace,
+  onWorkspaceChange,
   shapeCount,
   scopeLabel,
   onClose,
@@ -8591,6 +8651,8 @@ function TopActionPanel({
   onImportFiles: (files: FileList | File[]) => void;
   onPickFile: () => void;
   onNotice: (message: string) => void;
+  workspace: WorkplaneWorkspaceSettings;
+  onWorkspaceChange: (w: WorkplaneWorkspaceSettings) => void;
 }) {
   const title =
     panel === "profile"
@@ -8659,6 +8721,67 @@ function TopActionPanel({
       {panel === "settings" ? (
         <div className="top-action-body">
           <p>Workspace preferences</p>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 12px", background: "var(--tile)", borderRadius: "6px" }}>
+            <label htmlFor="theme-select" style={{ fontSize: "14px", fontWeight: 600 }}>Theme:</label>
+            <select
+              id="theme-select"
+              value={workspace.themeId || "light"}
+              onChange={(e) => onWorkspaceChange({ ...workspace, themeId: e.target.value })}
+              style={{ padding: "4px 8px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--background)", color: "var(--foreground)" }}
+            >
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="solidworks">SolidWorks</option>
+              <option value="inventor">Inventor</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          {workspace.themeId === "custom" && (
+            <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", maxHeight: "400px", overflowY: "auto", padding: "12px", background: "var(--tile)", borderRadius: "6px", border: "1px solid var(--border)" }}>
+              <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "0 0 8px 0", fontSize: "12px" }}>UI Colors</p>
+              {Object.entries(workspace.customTheme?.ui || defaultThemes.light.ui).map(([key, val]) => (
+                <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px" }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                  <input
+                    type="color"
+                    value={val as string}
+                    onChange={(e) => {
+                      const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
+                      onWorkspaceChange({
+                        ...workspace,
+                        customTheme: {
+                          ...base,
+                          ui: { ...base.ui, [key]: e.target.value }
+                        }
+                      });
+                    }}
+                    style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                  />
+                </label>
+              ))}
+              <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "12px 0 8px 0", fontSize: "12px" }}>3D Viewport Colors</p>
+              {Object.entries(workspace.customTheme?.viewport || defaultThemes.light.viewport).map(([key, val]) => (
+                <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px" }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                  <input
+                    type="color"
+                    value={val as string}
+                    onChange={(e) => {
+                      const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
+                      onWorkspaceChange({
+                        ...workspace,
+                        customTheme: {
+                          ...base,
+                          viewport: { ...base.viewport, [key]: e.target.value }
+                        }
+                      });
+                    }}
+                    style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
           <button onClick={() => onNotice("Grid display is controlled from the bottom-right Settings dialog")}>Grid and snapping</button>
           <button onClick={() => onNotice("Units are set to millimeters")}>Units: Millimeters</button>
           <button onClick={() => onNotice("Shadows and ray-traced lighting are enabled")}>Lighting and shadows</button>

@@ -4,6 +4,7 @@ import { Grid3X3, Palette, Ruler, X } from "lucide-react";
 import { useState, type CSSProperties } from "react";
 import { normalizeScaleForUnits, scaleOptionsForUnits, WORKSPACE_UNIT_OPTIONS } from "@/lib/measurementUnits";
 import { DEFAULT_WORKPLANE_WORKSPACE } from "@/lib/workplaneSettings";
+import { defaultThemes } from "@/lib/themes";
 import type { GridSize, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type WorkspaceSettings = WorkplaneWorkspaceSettings;
@@ -111,8 +112,68 @@ export function WorkspaceSettingsModal({
                 <>
                   <div className="workspace-section-heading">
                     <strong>Appearance</strong>
-                    <span>Adjust the canvas and navigation behavior.</span>
+                    <span>Adjust the canvas, theme, and navigation behavior.</span>
                   </div>
+                  <div className="workspace-row">
+                    <span>Theme</span>
+                    <select
+                      value={workspace.themeId || "light"}
+                      onChange={(event) => patchWorkspace({ themeId: event.target.value })}
+                      style={{ padding: "4px 8px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--tile)", color: "var(--foreground)", fontSize: "13px" }}
+                    >
+                      <option value="light">Light</option>
+                      <option value="dark">Dark</option>
+                      <option value="solidworks">SolidWorks</option>
+                      <option value="inventor">Inventor</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                  {workspace.themeId === "custom" && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", maxHeight: "280px", overflowY: "auto", padding: "12px", background: "var(--tile)", borderRadius: "6px", border: "1px solid var(--border)" }}>
+                      <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "0 0 8px 0", fontSize: "13px", color: "var(--foreground)" }}>UI Colors</p>
+                      {Object.entries(workspace.customTheme?.ui || defaultThemes.light.ui).map(([key, val]) => (
+                        <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)" }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                          <input
+                            type="color"
+                            value={val as string}
+                            onChange={(e) => {
+                              const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
+                              onWorkspaceChange({
+                                ...workspace,
+                                customTheme: {
+                                  ...base,
+                                  ui: { ...base.ui, [key]: e.target.value }
+                                }
+                              });
+                            }}
+                            style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                          />
+                        </label>
+                      ))}
+                      <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "12px 0 8px 0", fontSize: "13px", color: "var(--foreground)" }}>3D Viewport Colors</p>
+                      {Object.entries(workspace.customTheme?.viewport || defaultThemes.light.viewport).map(([key, val]) => (
+                        <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)" }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                          <input
+                            type="color"
+                            value={val as string}
+                            onChange={(e) => {
+                              const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
+                              onWorkspaceChange({
+                                ...workspace,
+                                customTheme: {
+                                  ...base,
+                                  viewport: { ...base.viewport, [key]: e.target.value }
+                                }
+                              });
+                            }}
+                            style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   <div className="workspace-row">
                     <span>Background color</span>
                     <button

@@ -16,6 +16,7 @@ describe("workplane settings helpers", () => {
       width: 300,
       depth: 250,
       background: "#ffffff",
+      themeId: "light",
     };
 
     expect(normalizeWorkspaceSettings(null, fallback)).toEqual(fallback);
