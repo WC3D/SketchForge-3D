@@ -11,6 +11,7 @@ type WorkspaceSettings = WorkplaneWorkspaceSettings;
 type WorkspaceSettingsSection = "appearance" | "measurement" | "workplane";
 
 const GRID_SIZES: GridSize[] = ["Off", "0.1 mm", "0.25 mm", "0.5 mm", "1.0 mm", "2.0 mm", "5.0 mm", "Brick"];
+const BACKGROUND_PRESETS = ["#ffffff", "#f8fbfc", "#e8e4e0", "#eaf7fb", "#9aa5b0", "#3a3f47", "#1e2028"];
 const MIN_WORKSPACE_SIZE = 60;
 const MAX_WORKSPACE_SIZE = 2000;
 const MIN_GRID_BLOCK_SIZE = 1;
@@ -186,14 +187,28 @@ export function WorkspaceSettingsModal({
                       ))}
                     </div>
                   )}
-                  <div className="workspace-row">
+                  <div className="workspace-bg-color">
                     <span>Background color</span>
-                    <button
-                      className="workspace-color-button"
-                      style={{ "--workspace-bg": workspace.background } as CSSProperties}
-                      aria-label="Background color"
-                      onClick={() => patchWorkspace({ background: workspace.background === "#f8fbfc" ? "#eaf7fb" : "#f8fbfc" })}
-                    />
+                    <div className="workspace-bg-swatches">
+                      {BACKGROUND_PRESETS.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          className={`workspace-bg-swatch${workspace.background === preset ? " active" : ""}`}
+                          style={{ background: preset }}
+                          aria-label={`Set background to ${preset}`}
+                          onClick={() => patchWorkspace({ background: preset })}
+                        />
+                      ))}
+                      <label className="workspace-bg-custom" aria-label="Custom background color">
+                        <input
+                          type="color"
+                          value={workspace.background}
+                          onChange={(event) => patchWorkspace({ background: event.currentTarget.value })}
+                        />
+                        <span>Custom</span>
+                      </label>
+                    </div>
                   </div>
                   <WorkspaceToggle label="Show shadows" checked={workspace.showShadows} onChange={(showShadows) => patchWorkspace({ showShadows })} />
                   <WorkspaceToggle label="Show grid" checked={workspace.showGrid} onChange={(showGrid) => patchWorkspace({ showGrid })} />

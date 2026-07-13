@@ -4260,6 +4260,63 @@ button {
   cursor: pointer;
 }
 
+.workspace-bg-color {
+  display: grid;
+  grid-template-columns: 145px 1fr;
+  align-items: start;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.workspace-bg-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-bg-swatch {
+  width: 22px;
+  height: 22px;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: 2px solid var(--border);
+  transition: outline-color 120ms ease, transform 120ms ease;
+}
+
+.workspace-bg-swatch:hover {
+  outline-color: var(--muted-strong);
+  transform: scale(1.1);
+}
+
+.workspace-bg-swatch.active {
+  outline-color: var(--primary);
+  outline-width: 2px;
+}
+
+.workspace-bg-custom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-strong);
+  cursor: pointer;
+}
+
+.workspace-bg-custom input[type="color"] {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+}
+
 .workspace-range {
   display: grid;
   grid-template-columns: 145px 1fr;
