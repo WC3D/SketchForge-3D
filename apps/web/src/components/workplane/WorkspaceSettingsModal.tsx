@@ -4,7 +4,7 @@ import { Grid3X3, Palette, Ruler, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { normalizeScaleForUnits, scaleOptionsForUnits, WORKSPACE_UNIT_OPTIONS } from "@/lib/measurementUnits";
 import { DEFAULT_WORKPLANE_WORKSPACE } from "@/lib/workplaneSettings";
-import { defaultThemes } from "@/lib/themes";
+import { customThemeWithDefaults } from "@/lib/themes";
 import type { GridSize, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type WorkspaceSettings = WorkplaneWorkspaceSettings;
@@ -25,6 +25,49 @@ const WORKSPACE_SIZE_PRESETS = [
   { label: "Custom", width: 200, depth: 200 },
 ];
 const GRID_BLOCK_PRESETS = ["1 mm", "2.5 mm", "5 mm", "10 mm", "20 mm", "50 mm", "100 mm", "Custom"] as const;
+
+export const isHexColor = (v: string) => /^#[0-9a-fA-F]{3,8}$/.test(v);
+
+export const UI_LABELS: Record<string, string> = {
+  background: "Background",
+  foreground: "Foreground",
+  topbar: "Top Bar",
+  subbar: "Sub Bar",
+  panel: "Panel",
+  tile: "Tile",
+  tileHover: "Tile Hover",
+  border: "Border",
+  borderStrong: "Border Strong",
+  muted: "Muted",
+  mutedStrong: "Muted Strong",
+  primary: "Primary",
+  activeTab: "Active Tab",
+  navText: "Nav Text",
+  workplane: "Workplane",
+  workplaneSoft: "Workplane Soft",
+  shadow: "Shadow",
+};
+
+export const VP_LABELS: Record<string, string> = {
+  background: "Background",
+  gridMinor: "Grid Minor",
+  gridMajor: "Grid Major",
+  gridAxis: "Grid Axis",
+  gridBorder: "Grid Border",
+  textPrimary: "Text Primary",
+  textSecondary: "Text Secondary",
+  handleDefault: "Handle Default",
+  handleHover: "Handle Hover",
+  handleActive: "Handle Active",
+  handleHoverAlt: "Handle Hover Alt",
+  handleActiveAlt: "Handle Active Alt",
+  handleMaterial: "Handle Material",
+  darkMaterial: "Dark Material",
+  dashMaterial: "Dash Material",
+  hole: "Hole",
+  holeEdge: "Hole Edge",
+  complexEdge: "Complex Edge",
+};
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -60,6 +103,7 @@ export function WorkspaceSettingsModal({
   }));
   const scaleOptions = scaleOptionsForUnits(workspace.units);
   const scaleValue = normalizeScaleForUnits(workspace.units, workspace.scale);
+  const customTheme = customThemeWithDefaults(workspace.customTheme);
   useEffect(() => {
     setDimensionDrafts({
       width: workspace.width.toFixed(workspace.accuracy),
@@ -142,46 +186,48 @@ export function WorkspaceSettingsModal({
                     </select>
                   </div>
                   {workspace.themeId === "custom" && (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", maxHeight: "280px", overflowY: "auto", padding: "12px", background: "var(--tile)", borderRadius: "6px", border: "1px solid var(--border)" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", alignContent: "start", gap: "10px", height: "400px", maxHeight: "45vh", overflowY: "auto", padding: "16px", background: "var(--tile)", borderRadius: "8px", border: "2px solid var(--primary)" }}>
                       <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "0 0 8px 0", fontSize: "13px", color: "var(--foreground)" }}>UI Colors</p>
-                      {Object.entries(workspace.customTheme?.ui || defaultThemes.light.ui).map(([key, val]) => (
-                        <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)" }}>
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                      {Object.entries(customTheme.ui)
+                        .filter(([, val]) => isHexColor(val as string))
+                        .map(([key, val]) => (
+                        <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)", padding: "2px 0" }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{UI_LABELS[key] || key}</span>
                           <input
                             type="color"
                             value={val as string}
                             onChange={(e) => {
-                              const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
                               onWorkspaceChange({
                                 ...workspace,
                                 customTheme: {
-                                  ...base,
-                                  ui: { ...base.ui, [key]: e.target.value }
+                                  ...customTheme,
+                                  ui: { ...customTheme.ui, [key]: e.target.value }
                                 }
                               });
                             }}
-                            style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                            style={{ width: "32px", height: "32px", padding: 0, border: "2px solid var(--border)", borderRadius: "4px", cursor: "pointer" }}
                           />
                         </label>
                       ))}
                       <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "12px 0 8px 0", fontSize: "13px", color: "var(--foreground)" }}>3D Viewport Colors</p>
-                      {Object.entries(workspace.customTheme?.viewport || defaultThemes.light.viewport).map(([key, val]) => (
-                        <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)" }}>
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+                      {Object.entries(customTheme.viewport)
+                        .filter(([, val]) => isHexColor(val as string))
+                        .map(([key, val]) => (
+                        <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--foreground)", padding: "2px 0" }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{VP_LABELS[key] || key}</span>
                           <input
                             type="color"
                             value={val as string}
                             onChange={(e) => {
-                              const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
                               onWorkspaceChange({
                                 ...workspace,
                                 customTheme: {
-                                  ...base,
-                                  viewport: { ...base.viewport, [key]: e.target.value }
+                                  ...customTheme,
+                                  viewport: { ...customTheme.viewport, [key]: e.target.value }
                                 }
                               });
                             }}
-                            style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                            style={{ width: "32px", height: "32px", padding: 0, border: "2px solid var(--border)", borderRadius: "4px", cursor: "pointer" }}
                           />
                         </label>
                       ))}

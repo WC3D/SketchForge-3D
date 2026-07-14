@@ -220,3 +220,15 @@ export const defaultThemes: Record<string, AppTheme> = {
     }
   }
 };
+
+export function customThemeWithDefaults(theme: AppTheme | undefined): AppTheme {
+  const fallback = defaultThemes.light;
+  return {
+    ...fallback,
+    ...theme,
+    id: "custom",
+    name: theme?.name || "Custom",
+    ui: { ...fallback.ui, ...theme?.ui },
+    viewport: { ...fallback.viewport, ...theme?.viewport },
+  };
+}

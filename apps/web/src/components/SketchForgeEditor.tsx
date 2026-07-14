@@ -46,6 +46,7 @@ import {
 import { WorkplaneViewport } from "./WorkplaneViewport";
 import { SketchWorkspace, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
+import { isHexColor, UI_LABELS, VP_LABELS } from "./workplane/WorkspaceSettingsModal";
 import {
   canonicalizeShape,
   cleanNearZero,
@@ -89,7 +90,7 @@ import {
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
 import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
-import { defaultThemes, type AppTheme } from "@/lib/themes";
+import { customThemeWithDefaults, defaultThemes, type AppTheme } from "@/lib/themes";
 
 export { importedShapeFromStl, importedShapeFromSvg };
 
@@ -5111,7 +5112,7 @@ export function SketchForgeEditor({
 
   const activeTheme = useMemo(() => {
     if (workspaceSettings.themeId === "custom" && workspaceSettings.customTheme) {
-      return workspaceSettings.customTheme;
+      return customThemeWithDefaults(workspaceSettings.customTheme);
     }
     return defaultThemes[workspaceSettings.themeId || "light"] || defaultThemes.light;
   }, [workspaceSettings.themeId, workspaceSettings.customTheme]);
@@ -8644,7 +8645,8 @@ function TopActionPanel({
           ? "Tips"
           : panel === "export"
             ? "Export"
-            : "Import";
+             : "Import";
+  const customTheme = customThemeWithDefaults(workspace.customTheme);
 
   return (
     <div className="top-action-panel" role="dialog" aria-label={title}>
@@ -8718,46 +8720,48 @@ function TopActionPanel({
             </select>
           </div>
           {workspace.themeId === "custom" && (
-            <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", maxHeight: "400px", overflowY: "auto", padding: "12px", background: "var(--tile)", borderRadius: "6px", border: "1px solid var(--border)" }}>
+            <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", alignContent: "start", gap: "10px", height: "400px", maxHeight: "60vh", overflowY: "auto", padding: "16px", background: "var(--tile)", borderRadius: "8px", border: "2px solid var(--primary)" }}>
               <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "0 0 8px 0", fontSize: "12px" }}>UI Colors</p>
-              {Object.entries(workspace.customTheme?.ui || defaultThemes.light.ui).map(([key, val]) => (
-                <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px" }}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+              {Object.entries(customTheme.ui)
+                .filter(([, val]) => isHexColor(val as string))
+                .map(([key, val]) => (
+                <label key={`ui-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", padding: "2px 0" }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{UI_LABELS[key] || key}</span>
                   <input
                     type="color"
                     value={val as string}
                     onChange={(e) => {
-                      const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
                       onWorkspaceChange({
                         ...workspace,
                         customTheme: {
-                          ...base,
-                          ui: { ...base.ui, [key]: e.target.value }
+                          ...customTheme,
+                          ui: { ...customTheme.ui, [key]: e.target.value }
                         }
                       });
                     }}
-                    style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    style={{ width: "32px", height: "32px", padding: 0, border: "2px solid var(--border)", borderRadius: "4px", cursor: "pointer" }}
                   />
                 </label>
               ))}
               <p style={{ gridColumn: "1 / -1", fontWeight: 600, margin: "12px 0 8px 0", fontSize: "12px" }}>3D Viewport Colors</p>
-              {Object.entries(workspace.customTheme?.viewport || defaultThemes.light.viewport).map(([key, val]) => (
-                <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px" }}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{key}</span>
+              {Object.entries(customTheme.viewport)
+                .filter(([, val]) => isHexColor(val as string))
+                .map(([key, val]) => (
+                <label key={`vp-${key}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", padding: "2px 0" }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{VP_LABELS[key] || key}</span>
                   <input
                     type="color"
                     value={val as string}
                     onChange={(e) => {
-                      const base = workspace.customTheme || { ...defaultThemes.light, id: "custom", name: "Custom" };
                       onWorkspaceChange({
                         ...workspace,
                         customTheme: {
-                          ...base,
-                          viewport: { ...base.viewport, [key]: e.target.value }
+                          ...customTheme,
+                          viewport: { ...customTheme.viewport, [key]: e.target.value }
                         }
                       });
                     }}
-                    style={{ width: "22px", height: "22px", padding: 0, border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    style={{ width: "32px", height: "32px", padding: 0, border: "2px solid var(--border)", borderRadius: "4px", cursor: "pointer" }}
                   />
                 </label>
               ))}
