@@ -2351,6 +2351,21 @@ button {
   vector-effect: non-scaling-stroke;
 }
 
+.sketch-circle-preview > circle:not(.center) {
+  fill: rgba(22, 159, 206, 0.08);
+  stroke: #169fce;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-circle-preview > circle.center {
+  fill: var(--background);
+  stroke: #169fce;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
 .sketch-drag-handles line,
 .sketch-curve-handles line {
   stroke: #f08036;

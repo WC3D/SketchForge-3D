@@ -1,14 +1,19 @@
 import type { NextConfig } from "next";
+import { networkInterfaces } from "node:os";
 
 const isStaticExport = process.env.STATIC_EXPORT === "true";
 const extraAllowedDevOrigins = (process.env.SKETCHFORGE_ALLOWED_DEV_ORIGINS ?? "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const localNetworkDevOrigins = Object.values(networkInterfaces())
+  .flatMap((addresses) => addresses ?? [])
+  .filter((address) => address.family === "IPv4" && !address.internal)
+  .map((address) => address.address);
 
 const nextConfig: NextConfig = {
   devIndicators: false,
-  allowedDevOrigins: ["localhost", "127.0.0.1", ...extraAllowedDevOrigins],
+  allowedDevOrigins: ["localhost", "127.0.0.1", ...localNetworkDevOrigins, ...extraAllowedDevOrigins],
   env: {
     NEXT_PUBLIC_STATIC_EXPORT: isStaticExport ? "true" : "false",
   },

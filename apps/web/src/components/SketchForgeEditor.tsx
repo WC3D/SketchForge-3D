@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Download, X } from "lucide-react";
+import { Check, Circle, CircleDot, Download, X } from "lucide-react";
 import type manifoldModule from "manifold-3d";
 import type { ManifoldToplevel } from "manifold-3d";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,7 +44,7 @@ import {
   ToolbarWorkplaneIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
-import { SketchWorkspace, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
+import { SketchWorkspace, type SketchCircleDraft, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import { isHexColor, UI_LABELS, VP_LABELS } from "./workplane/WorkspaceSettingsModal";
 import {
@@ -74,6 +74,7 @@ import {
 import { cloneWorkplaneShapeSnapshot, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
 import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
 import { createLocalId } from "@/lib/localIds";
+import { circleFromPoints, circleSketchGeometry } from "@/lib/sketchCircles";
 import { projectExportFileName } from "@/lib/exportNames";
 import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
 import { importedShapeFromStl, importExtensionSupported } from "@/lib/stlImport";
@@ -5166,6 +5167,7 @@ export function SketchForgeEditor({
   const [sketchSelection, setSketchSelection] = useState<SketchSelection>(null);
   const [sketchMeasureStart, setSketchMeasureStart] = useState<SketchPoint | null>(null);
   const [sketchMeasurement, setSketchMeasurement] = useState<SketchMeasurement>(null);
+  const [sketchCircleDraft, setSketchCircleDraft] = useState<SketchCircleDraft | null>(null);
   const [editingSketchShapeId, setEditingSketchShapeId] = useState<string | null>(null);
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
@@ -5728,6 +5730,7 @@ export function SketchForgeEditor({
     setSketchSelection(null);
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
+    setSketchCircleDraft(null);
     setEditingSketchShapeId(editingId);
     setNotice(editingId ? "Editing sketch profile" : "Sketch started: place the first point");
   }, []);
@@ -5746,6 +5749,7 @@ export function SketchForgeEditor({
     setSketchSelection(null);
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
+    setSketchCircleDraft(null);
     setEditingSketchShapeId(null);
     setNotice("Sketch cancelled");
   }, []);
@@ -5759,6 +5763,7 @@ export function SketchForgeEditor({
     setSketchHistoryIndex(nextIndex);
     setSketchProfile(cloneSketchProfile(sketchHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
+    setSketchCircleDraft(null);
     setSketchSelection(null);
     setNotice("Sketch undo");
   }, [sketchHistory, sketchHistoryIndex]);
@@ -5772,6 +5777,7 @@ export function SketchForgeEditor({
     setSketchHistoryIndex(nextIndex);
     setSketchProfile(cloneSketchProfile(sketchHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
+    setSketchCircleDraft(null);
     setSketchSelection(null);
     setNotice("Sketch redo");
   }, [sketchHistory, sketchHistoryIndex]);
@@ -5779,12 +5785,15 @@ export function SketchForgeEditor({
   const setActiveSketchTool = useCallback((tool: SketchTool) => {
     setSketchTool(tool);
     setSketchActivePointId(null);
+    setSketchCircleDraft(null);
     setSketchSelection(null);
     if (tool !== "measure") setSketchMeasureStart(null);
     const messages: Record<SketchTool, string> = {
       line: "Line: click points to draw straight segments",
       bezier: "Bézier: click and drag points to pull curve handles",
       smooth: "Smooth curve: click points to build a flowing path",
+      "circle-center": "Center circle: choose the center, then a radius point",
+      "circle-diameter": "Two-point circle: choose opposite points on the diameter",
       select: "Select: edit sketch geometry or place and scale reference images",
       refine: "Refine: click a segment to add a point, or a point to remove it",
       erase: "Erase: click a point or segment to remove it",
@@ -5853,6 +5862,37 @@ export function SketchForgeEditor({
         measureSketchPoint({ id: "measure", ...position });
         return;
       }
+      if (sketchTool === "circle-center" || sketchTool === "circle-diameter") {
+        if (!sketchCircleDraft || sketchCircleDraft.tool !== sketchTool) {
+          setSketchCircleDraft({ tool: sketchTool, first: position });
+          setSketchSelection(null);
+          setNotice(sketchTool === "circle-center" ? "Choose a point on the circle" : "Choose the opposite diameter point");
+          return;
+        }
+        const { center, radius } = circleFromPoints(
+          sketchTool === "circle-center" ? "center-radius" : "diameter",
+          sketchCircleDraft.first,
+          position,
+        );
+        if (radius < 0.0001) {
+          setNotice("Circle radius must be greater than zero");
+          return;
+        }
+        const circle = circleSketchGeometry(center, radius);
+        const next: SketchProfile = {
+          ...sketchProfile,
+          points: [...sketchProfile.points, ...circle.points],
+          segments: [...sketchProfile.segments, ...circle.segments],
+        };
+        commitSketchProfile(next, sketchTool === "circle-center" ? "Center circle added" : "Two-point circle added");
+        setSketchCircleDraft(null);
+        setSketchSelection({
+          kind: "multiple",
+          pointIds: circle.points.map((point) => point.id),
+          segmentIds: circle.segments.map((segment) => segment.id),
+        });
+        return;
+      }
       if (!["line", "bezier", "smooth"].includes(sketchTool)) return;
       const curveKind = sketchTool as NonNullable<SketchSegment["kind"]>;
       const existing = sketchProfile.points.find((point) => Math.hypot(point.x - position.x, point.z - position.z) < 0.0001);
@@ -5875,7 +5915,7 @@ export function SketchForgeEditor({
       setSketchActivePointId(point.id);
       setSketchSelection({ kind: "point", id: point.id });
     },
-    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchProfile, sketchTool],
+    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchCircleDraft, sketchProfile, sketchTool],
   );
 
   const pressSketchPoint = useCallback(
@@ -5892,9 +5932,13 @@ export function SketchForgeEditor({
         setSketchActivePointId(null);
         return;
       }
+      if (sketchTool === "circle-center" || sketchTool === "circle-diameter") {
+        addSketchPlanePoint({ x: point.x, z: point.z });
+        return;
+      }
       connectSketchPoint(id);
     },
-    [connectSketchPoint, measureSketchPoint, sketchProfile.points, sketchTool],
+    [addSketchPlanePoint, connectSketchPoint, measureSketchPoint, sketchProfile.points, sketchTool],
   );
 
   const deleteSketchPoint = useCallback(
@@ -6087,6 +6131,7 @@ export function SketchForgeEditor({
       const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
       commitShapes(nextShapes, extruded.id, existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height");
       setSketchActive(false);
+      setSketchCircleDraft(null);
       setEditingSketchShapeId(null);
       setToolbarMode("geometry");
     } catch (error) {
@@ -7740,6 +7785,7 @@ export function SketchForgeEditor({
         if (event.key === "Escape") {
           event.preventDefault();
           setSketchActivePointId(null);
+          setSketchCircleDraft(null);
           setSketchSelection(null);
           setNotice("Current sketch chain cleared");
         } else if (event.key === "Delete" || event.key === "Backspace") {
@@ -7996,6 +8042,7 @@ export function SketchForgeEditor({
             selected={sketchSelection}
             measurement={sketchMeasurement}
             pendingMeasurementStart={sketchMeasureStart}
+            circleDraft={sketchCircleDraft}
             initialSnap={initialSnap}
             initialWorkspace={initialWorkspace}
             onPlanePoint={addSketchPlanePoint}
@@ -8506,6 +8553,12 @@ function SecondaryToolbar({
                     </button>
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "smooth" ? "active" : ""}`} type="button" aria-label="Smooth Curve" title="Smooth Curve" onClick={() => onSketchTool("smooth")}>
                       <SketchReferenceIcon name="smooth" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "circle-center" ? "active" : ""}`} type="button" aria-label="Center Point Circle" title="Center Point Circle" onClick={() => onSketchTool("circle-center")}>
+                      <CircleDot aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "circle-diameter" ? "active" : ""}`} type="button" aria-label="Two Point Circle" title="Two Point Circle" onClick={() => onSketchTool("circle-diameter")}>
+                      <Circle aria-hidden="true" />
                     </button>
                   </div>
                 </div>

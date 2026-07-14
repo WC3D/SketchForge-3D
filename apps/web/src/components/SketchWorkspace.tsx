@@ -1,13 +1,18 @@
 "use client";
 
 import { ChevronUp, CornerDownRight, Home, Link, Link2Off, Minus, Plus, Split, Trash2, Waves } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { SnapGridControl } from "@/components/workplane/ShapeInspector";
 import { mirrorSign, resizedImportedMeshPositions } from "@/lib/workplaneShapes";
+import { circleFromPoints } from "@/lib/sketchCircles";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import type { GridSize, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
-export type SketchTool = "line" | "bezier" | "smooth" | "select" | "refine" | "erase" | "measure";
+export type SketchTool = "line" | "bezier" | "smooth" | "circle-center" | "circle-diameter" | "select" | "refine" | "erase" | "measure";
+export type SketchCircleDraft = {
+  tool: "circle-center" | "circle-diameter";
+  first: { x: number; z: number };
+};
 export type SketchSelection =
   | { kind: "point"; id: string }
   | { kind: "segment"; id: string }
@@ -24,6 +29,7 @@ type SketchWorkspaceProps = {
   selected: SketchSelection;
   measurement: SketchMeasurement;
   pendingMeasurementStart: SketchPoint | null;
+  circleDraft: SketchCircleDraft | null;
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
@@ -404,6 +410,7 @@ export function SketchWorkspace({
   selected,
   measurement,
   pendingMeasurementStart,
+  circleDraft,
   initialSnap,
   initialWorkspace,
   onPlanePoint,
@@ -535,6 +542,17 @@ export function SketchWorkspace({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setZoom((current) => clamp(current * (event.deltaY > 0 ? 0.88 : 1.14), 0.75, 6));
+    };
+    svg.addEventListener("wheel", handleWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", handleWheel);
+  }, []);
+
   const beginPan = (event: ReactPointerEvent<SVGElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -557,7 +575,7 @@ export function SketchWorkspace({
     } else if (tool === "select") {
       event.currentTarget.setPointerCapture(event.pointerId);
       setPointerAction({ kind: "marquee", pointerId: event.pointerId, origin: point, current: point });
-    } else if (tool === "line" || tool === "smooth" || tool === "measure") {
+    } else if (tool === "line" || tool === "smooth" || tool === "circle-center" || tool === "circle-diameter" || tool === "measure") {
       onPlanePoint(point);
     }
   };
@@ -634,11 +652,6 @@ export function SketchWorkspace({
     setPointerAction(null);
   };
 
-  const handleWheel = (event: ReactWheelEvent<SVGSVGElement>) => {
-    event.preventDefault();
-    setZoom((current) => clamp(current * (event.deltaY > 0 ? 0.88 : 1.14), 0.75, 6));
-  };
-
   const beginEntityDrag = (event: ReactPointerEvent<SVGElement>, action: PointerAction) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -651,6 +664,9 @@ export function SketchWorkspace({
   const measurementLabel = formatDimension(measurementLength, workspace.accuracy);
   const previewLength = activePoint && hover ? Math.hypot(hover.x - activePoint.x, hover.z - activePoint.z) : 0;
   const previewLabel = formatDimension(previewLength, workspace.accuracy);
+  const circlePreview = circleDraft && hover ? (() => {
+    return circleFromPoints(circleDraft.tool === "circle-center" ? "center-radius" : "diameter", circleDraft.first, hover);
+  })() : null;
   const labelOffset = 22 * screenUnit;
   const pointRadius = 5 * screenUnit;
   const controlPointRadius = 6 * screenUnit;
@@ -697,7 +713,6 @@ export function SketchWorkspace({
           onPointerUp={finishPointerAction}
           onPointerCancel={() => setPointerAction(null)}
           onPointerLeave={() => !pointerAction && setHover(null)}
-          onWheel={handleWheel}
         >
           <rect className="sketch-plate-background" x={-workspace.width / 2} y={-workspace.depth / 2} width={workspace.width} height={workspace.depth} />
           {workspace.showGrid ? (
@@ -790,6 +805,7 @@ export function SketchWorkspace({
                   if (event.button === 1) beginPan(event);
                   else if (tool === "erase") onDeleteSegment(segment.id);
                   else if (event.button === 0 && tool === "refine" && point) onInsertPoint(segment.id, point);
+                  else if (event.button === 0 && (tool === "circle-center" || tool === "circle-diameter") && point) onPlanePoint(point);
                   else if (event.button === 0) onSelectSegment(segment.id);
                 }}
               />
@@ -821,6 +837,31 @@ export function SketchWorkspace({
                   </>
                 );
               })()}
+            </g>
+          ) : null}
+          {circleDraft && hover && circlePreview ? (
+            <g className="sketch-circle-preview" pointerEvents="none">
+              <circle cx={circlePreview.center.x} cy={circlePreview.center.z} r={circlePreview.radius} />
+              <line
+                className="sketch-preview-line"
+                x1={circleDraft.first.x}
+                y1={circleDraft.first.z}
+                x2={hover.x}
+                y2={hover.z}
+              />
+              <circle className="center" cx={circlePreview.center.x} cy={circlePreview.center.z} r={pointRadius} />
+              <g className="sketch-segment-dimensions preview" transform={`translate(${(circleDraft.first.x + hover.x) / 2} ${(circleDraft.first.z + hover.z) / 2 - labelOffset})`}>
+                {(() => {
+                  const label = `${circleDraft.tool === "circle-center" ? "R" : "Ø"} ${formatDimension(circleDraft.tool === "circle-center" ? circlePreview.radius : circlePreview.radius * 2, workspace.accuracy)}`;
+                  const pill = dimensionPillSize(label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{label}</text>
+                    </>
+                  );
+                })()}
+              </g>
             </g>
           ) : null}
           {pointerAction?.kind === "bezier" ? (

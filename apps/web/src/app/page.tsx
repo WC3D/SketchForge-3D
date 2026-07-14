@@ -449,9 +449,12 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dataUrl: snapshot.image, projectId: snapshot.projectId }),
     })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((payload: { version?: number } | null) => {
-        const nextVersion = payload?.version ?? Date.now();
+      .then((response) => {
+        if (!response.ok) throw new Error(`Thumbnail request failed with ${response.status}`);
+        return response.json() as Promise<{ version?: number }>;
+      })
+      .then((payload) => {
+        const nextVersion = payload.version ?? Date.now();
         const thumbnailUrl = `/api/project-thumbnail?projectId=${encodeURIComponent(snapshot.projectId)}&v=${nextVersion}`;
         setProjects((current) =>
           current.map((project) =>
