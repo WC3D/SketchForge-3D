@@ -3,6 +3,7 @@
 import { Clock3, EllipsisVertical, FileUp, Grid3X3, HomeIcon, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SketchForgeEditor, importedShapeFromStl, importedShapeFromSvg } from "@/components/SketchForgeEditor";
+import { hydrateEditorHistoryState, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { createLocalId } from "@/lib/localIds";
 import { importExtensionSupported } from "@/lib/stlImport";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
@@ -34,10 +35,16 @@ type StoredDashboardProject = Partial<DashboardProject> & {
 type ProjectShapeCacheEntry = {
   revision: number;
   shapes: WorkplaneShape[];
+  history: EditorHistoryEntry[];
+  historyIndex: number;
 };
 
-type ProjectShapeRecord = ProjectShapeCacheEntry & {
+type ProjectShapeRecord = {
   id: string;
+  revision: number;
+  shapes: WorkplaneShape[];
+  history?: EditorHistoryEntry[];
+  historyIndex?: number;
   updatedAt: number;
 };
 
@@ -69,6 +76,21 @@ function formatUpdated(timestamp: number) {
   if (age < 3_600_000) return `${Math.max(1, Math.round(age / 60_000))} min ago`;
   if (age < 86_400_000) return "Today";
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(timestamp));
+}
+
+function projectShapeCacheEntry(
+  revision: number,
+  shapes: WorkplaneShape[],
+  history?: EditorHistoryEntry[],
+  historyIndex?: number,
+): ProjectShapeCacheEntry {
+  const hydrated = hydrateEditorHistoryState(shapes, history, historyIndex);
+  return {
+    revision,
+    shapes: hydrated.entries[hydrated.index]?.shapes ?? shapes,
+    history: hydrated.entries,
+    historyIndex: hydrated.index,
+  };
 }
 
 function openProjectShapesDb() {
@@ -105,7 +127,7 @@ async function loadProjectShapes(projectId: string) {
   });
 }
 
-async function saveProjectShapes(projectId: string, shapes: WorkplaneShape[], revision: number) {
+async function saveProjectShapes(projectId: string, entry: ProjectShapeCacheEntry) {
   const database = await openProjectShapesDb();
   return new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(PROJECT_SHAPES_STORE_NAME, "readwrite");
@@ -116,10 +138,10 @@ async function saveProjectShapes(projectId: string, shapes: WorkplaneShape[], re
     };
     existingRequest.onsuccess = () => {
       const existing = existingRequest.result as ProjectShapeRecord | undefined;
-      if (existing && existing.revision > revision) {
+      if (existing && existing.revision > entry.revision) {
         return;
       }
-      store.put({ id: projectId, revision, shapes, updatedAt: Date.now() } satisfies ProjectShapeRecord);
+      store.put({ id: projectId, ...entry, updatedAt: Date.now() } satisfies ProjectShapeRecord);
     };
     transaction.oncomplete = () => {
       database.close();
@@ -165,7 +187,7 @@ function readStoredProjects() {
         const revision = typeof project.revision === "number" ? project.revision : updatedAt;
         const designShapes = Array.isArray(project.designShapes) ? (project.designShapes as WorkplaneShape[]) : null;
         if (designShapes) {
-          legacyShapes[id] = { revision, shapes: designShapes };
+          legacyShapes[id] = projectShapeCacheEntry(revision, designShapes);
         }
         return {
           id,
@@ -291,7 +313,7 @@ export default function Home() {
     if (Object.keys(legacyShapes).length > 0) {
       setProjectShapesById(legacyShapes);
       Object.entries(legacyShapes).forEach(([projectId, entry]) => {
-        void saveProjectShapes(projectId, entry.shapes, entry.revision).catch(() => {
+        void saveProjectShapes(projectId, entry).catch(() => {
           setDashboardNotice("Could not migrate project shapes to larger storage");
         });
       });
@@ -367,12 +389,10 @@ export default function Home() {
       .then((record) => {
         if (canceled) return;
         const revision = activeProject.revision ?? record?.revision ?? Date.now();
+        const entry = projectShapeCacheEntry(revision, record?.shapes ?? [], record?.history, record?.historyIndex);
         setProjectShapesById((current) => ({
           ...current,
-          [activeProjectId]: {
-            revision,
-            shapes: record?.shapes ?? [],
-          },
+          [activeProjectId]: entry,
         }));
       })
       .catch((error) => {
@@ -380,10 +400,7 @@ export default function Home() {
           setDashboardNotice(error instanceof Error ? error.message : "Could not load project shapes");
           setProjectShapesById((current) => ({
             ...current,
-            [activeProjectId]: {
-              revision: activeProject.revision ?? Date.now(),
-              shapes: [],
-            },
+            [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
           }));
         }
       });
@@ -471,9 +488,15 @@ export default function Home() {
       });
   }, []);
 
-  const updateProjectShapes = useCallback((snapshot: { projectId: string; shapes: WorkplaneShape[] }) => {
+  const updateProjectShapes = useCallback((snapshot: {
+    projectId: string;
+    shapes: WorkplaneShape[];
+    history: EditorHistoryEntry[];
+    historyIndex: number;
+  }) => {
     const revision = Math.max(Date.now(), nextProjectRevisionRef.current + 1);
     nextProjectRevisionRef.current = revision;
+    const entry = projectShapeCacheEntry(revision, snapshot.shapes, snapshot.history, snapshot.historyIndex);
     setProjectShapesById((current) => {
       const existing = current[snapshot.projectId];
       if (existing && existing.revision > revision) {
@@ -481,12 +504,12 @@ export default function Home() {
       }
       return {
         ...current,
-        [snapshot.projectId]: { revision, shapes: snapshot.shapes },
+        [snapshot.projectId]: entry,
       };
     });
 
     const previousSave = projectShapeSaveQueuesRef.current[snapshot.projectId] ?? Promise.resolve();
-    const queuedSave = previousSave.catch(() => undefined).then(() => saveProjectShapes(snapshot.projectId, snapshot.shapes, revision));
+    const queuedSave = previousSave.catch(() => undefined).then(() => saveProjectShapes(snapshot.projectId, entry));
     projectShapeSaveQueuesRef.current[snapshot.projectId] = queuedSave;
 
     void queuedSave
@@ -541,9 +564,9 @@ export default function Home() {
     const project = newProject(name ?? `Untitled design ${projects.length + 1}`, projects.length);
     setProjectShapesById((current) => ({
       ...current,
-      [project.id]: { revision: project.revision ?? project.updatedAt, shapes: [] },
+      [project.id]: projectShapeCacheEntry(project.revision ?? project.updatedAt, []),
     }));
-    void saveProjectShapes(project.id, [], project.revision ?? project.updatedAt).catch(() => {
+    void saveProjectShapes(project.id, projectShapeCacheEntry(project.revision ?? project.updatedAt, [])).catch(() => {
       setDashboardNotice("Could not prepare project shape storage");
     });
     setProjects((current) => [project, ...current]);
@@ -564,10 +587,11 @@ export default function Home() {
           : importedShapeFromStl(file.name, await file.arrayBuffer());
         const project = newProject(projectNameFromFileName(file.name), projects.length, 1);
         const revision = project.revision ?? project.updatedAt;
-        await saveProjectShapes(project.id, [shape], revision);
+        const entry = projectShapeCacheEntry(revision, [shape]);
+        await saveProjectShapes(project.id, entry);
         setProjectShapesById((current) => ({
           ...current,
-          [project.id]: { revision, shapes: [shape] },
+          [project.id]: entry,
         }));
         setDashboardNotice(`Imported ${file.name}`);
         setProjects((current) => [project, ...current]);
@@ -696,6 +720,8 @@ export default function Home() {
         <div className={view === "editor" ? "editor-stage active" : "editor-stage"} aria-hidden={view !== "editor"}>
           <SketchForgeEditor
             initialShapes={activeProjectShapeEntry?.shapes ?? []}
+            initialHistory={activeProjectShapeEntry?.history}
+            initialHistoryIndex={activeProjectShapeEntry?.historyIndex}
             initialSnap={activeProject?.snapGrid ?? DEFAULT_SNAP_GRID}
             initialWorkspace={activeProject?.workspace ?? DEFAULT_WORKPLANE_WORKSPACE}
             onHome={openDashboard}

@@ -13,7 +13,21 @@ const localNetworkDevOrigins = Object.values(networkInterfaces())
 
 const nextConfig: NextConfig = {
   devIndicators: false,
-  allowedDevOrigins: ["localhost", "127.0.0.1", ...localNetworkDevOrigins, ...extraAllowedDevOrigins],
+  // Keep the live development compiler isolated from `next build`. Sharing
+  // `.next` lets a production verification build invalidate chunks used by a
+  // running dev server, which also breaks API routes such as project snapshots.
+  distDir:
+    isStaticExport
+      ? ".next-export"
+      : process.env.NODE_ENV === "development"
+        ? ".next-dev"
+        : ".next",
+  allowedDevOrigins: [
+    "localhost",
+    "127.0.0.1",
+    ...localNetworkDevOrigins,
+    ...extraAllowedDevOrigins,
+  ],
   env: {
     NEXT_PUBLIC_STATIC_EXPORT: isStaticExport ? "true" : "false",
   },
@@ -34,7 +48,6 @@ const nextConfig: NextConfig = {
   ...(isStaticExport
     ? {
         output: "export" as const,
-        distDir: ".next-export",
         trailingSlash: true,
       }
     : {}),
