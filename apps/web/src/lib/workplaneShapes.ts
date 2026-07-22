@@ -29,8 +29,31 @@ export function shapeDepth(shape: WorkplaneShape) {
   return shape.depth ?? shape.size;
 }
 
+export function meshYawDegrees(shape: WorkplaneShape) {
+  const isRoundPrimitive = !shape.importedMesh && (shape.kind === "cylinder" || shape.kind === "cone");
+  const isCircular = Math.abs(shapeWidth(shape) - shapeDepth(shape)) < 0.0005;
+  if (!isRoundPrimitive || !isCircular) {
+    return shape.rotation;
+  }
+
+  // A tessellated circular primitive is only invariant by one whole side step.
+  // Preserve the remaining yaw so low-sided cylinders (for example a triangular
+  // prism) are baked and used in booleans at the same angle shown in the viewport.
+  const sides = Math.max(3, Math.round(shape.sides ?? 96));
+  const sideStep = 360 / sides;
+  const normalized = normalizeDegrees(shape.rotation);
+  const equivalentYaw = normalized - Math.round(normalized / sideStep) * sideStep;
+  return Math.abs(equivalentYaw) < 1e-9 ? 0 : equivalentYaw;
+}
+
+function edgeTreatmentPreserveZone(shape: WorkplaneShape): number {
+  const own = Math.max(...(shape.edgeTreatments ?? []).map((feature) => feature.amount), 0);
+  const child = Math.max(...(shape.groupedShapes ?? []).map(edgeTreatmentPreserveZone), 0);
+  return Math.max(own, child);
+}
+
 export function preservesEdgeTreatmentSize(shape: WorkplaneShape) {
-  return shape.edgeResizeMode === "preserve" && Boolean(shape.importedMesh && shape.edgeTreatments?.length);
+  return shape.edgeResizeMode === "preserve" && Boolean(shape.importedMesh && edgeTreatmentPreserveZone(shape) > 0);
 }
 
 function edgePreservedCoordinate(value: number, baseSize: number, targetSize: number, centered: boolean, requestedZone: number) {
@@ -57,7 +80,7 @@ export function resizedImportedCoordinates(shape: WorkplaneShape, sourcePosition
   const depth = shapeDepth(shape);
   const height = shape.height;
   const preserve = preservesEdgeTreatmentSize(shape);
-  const zone = preserve ? Math.max(...(shape.edgeTreatments ?? []).map((feature) => feature.amount), 0) : 0;
+  const zone = preserve ? edgeTreatmentPreserveZone(shape) : 0;
   const positions = new Array<number>(sourcePositions.length);
   for (let index = 0; index + 2 < sourcePositions.length; index += 3) {
     if (preserve) {
@@ -182,6 +205,7 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.groupedBaseWidth === b.groupedBaseWidth &&
     a.groupedBaseDepth === b.groupedBaseDepth &&
     a.groupedBaseHeight === b.groupedBaseHeight &&
+    a.groupOperation === b.groupOperation &&
     a.locked === b.locked &&
     a.hidden === b.hidden
   );

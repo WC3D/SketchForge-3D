@@ -106,8 +106,6 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdat
   if (shape.kind === "cylinder") {
     return [
       { label: "Sides", value: shape.sides ?? 96, min: 3, max: 128, step: 1, onChange: (sides) => onUpdate({ sides: Math.round(sides) }) },
-      { label: "Bevel", value: shape.bevel ?? 0, min: 0, max: 10, onChange: (bevel) => onUpdate({ bevel }) },
-      { label: "Segments", value: shape.segments ?? 1, min: 1, max: 24, step: 1, onChange: (segments) => onUpdate({ segments: Math.round(segments) }) },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setWidth },
       { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setHeight },
@@ -202,36 +200,44 @@ export function ShapeInspector({
   snapOpen,
   workspace,
   onUpdate,
-  onClose,
   onSnapChange,
   onSnapOpenChange,
   onEditSketch,
   canSeparateParts = false,
   onSeparateParts,
+  onInteractionActiveChange,
 }: {
   shape: WorkplaneShape;
   snap: GridSize;
   snapOpen: boolean;
   workspace: WorkplaneWorkspaceSettings;
   onUpdate: ShapeInspectorUpdate;
-  onClose: () => void;
   onSnapChange: Dispatch<SetStateAction<GridSize>>;
   onSnapOpenChange: Dispatch<SetStateAction<boolean>>;
   onEditSketch?: () => void;
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
+  onInteractionActiveChange?: (active: boolean) => void;
 }) {
   const solidColor = shape.hole ? fallbackSolidColor(shape) : shape.color;
   const locked = Boolean(shape.locked);
   const properties = getShapeProperties(shape, onUpdate);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [colorOpen, setColorOpen] = useState(false);
+  const [minimized, setMinimized] = useState(false);
+
+  useEffect(() => () => onInteractionActiveChange?.(false), [onInteractionActiveChange]);
 
   return (
-    <aside className="shape-inspector" aria-label={`${shape.name} shape settings`} onPointerDown={(event) => event.stopPropagation()}>
+    <aside className={`shape-inspector ${minimized ? "minimized" : ""}`} aria-label={`${shape.name} shape settings`} onPointerDown={(event) => event.stopPropagation()}>
       <div className="shape-inspector-header">
-        <button className="inspector-header-icon" aria-label="Close shape settings" onClick={onClose}>
-          <ChevronUp size={26} strokeWidth={2.8} />
+        <button
+          className="inspector-header-icon"
+          aria-label={minimized ? "Expand shape settings" : "Minimize shape settings"}
+          aria-expanded={!minimized}
+          onClick={() => setMinimized((current) => !current)}
+        >
+          {minimized ? <ChevronDown size={26} strokeWidth={2.8} /> : <ChevronUp size={26} strokeWidth={2.8} />}
         </button>
         <strong>{shape.name}</strong>
         <div className="inspector-header-actions">
@@ -244,6 +250,8 @@ export function ShapeInspector({
         </div>
       </div>
 
+      {!minimized ? (
+        <>
       <div className="shape-state-card" role="group" aria-label="Shape mode">
         <button
           className={!shape.hole ? "active solid-choice" : "solid-choice"}
@@ -300,6 +308,8 @@ export function ShapeInspector({
                 type="color"
                 value={solidColor}
                 disabled={locked}
+                onFocus={() => onInteractionActiveChange?.(true)}
+                onBlur={() => onInteractionActiveChange?.(false)}
                 onChange={(event) => {
                   onUpdate({ color: event.target.value, hole: false });
                   setColorOpen(false);
@@ -339,12 +349,12 @@ export function ShapeInspector({
           <div className="property-list" id={`properties-${shape.id}`}>
             {properties.map((property) => {
               if (property.type === "text") {
-                return <TextProperty key={property.label} {...property} disabled={locked} />;
+                return <TextProperty key={property.label} {...property} disabled={locked} onInteractionActiveChange={onInteractionActiveChange} />;
               }
               if (property.type === "select") {
                 return <SelectProperty key={property.label} {...property} disabled={locked} />;
               }
-              return <RangeProperty key={property.label} {...property} workspace={workspace} disabled={locked} />;
+              return <RangeProperty key={property.label} {...property} workspace={workspace} disabled={locked} onInteractionActiveChange={onInteractionActiveChange} />;
             })}
           </div>
         ) : null}
@@ -352,6 +362,8 @@ export function ShapeInspector({
       <div className="inspector-snap-dock">
         <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={onSnapChange} onSnapOpenChange={onSnapOpenChange} />
       </div>
+        </>
+      ) : null}
     </aside>
   );
 }
@@ -403,7 +415,8 @@ function RangeProperty({
   workspace,
   disabled,
   onChange,
-}: RangePropertyConfig & { workspace: WorkplaneWorkspaceSettings; disabled?: boolean }) {
+  onInteractionActiveChange,
+}: RangePropertyConfig & { workspace: WorkplaneWorkspaceSettings; disabled?: boolean; onInteractionActiveChange?: (active: boolean) => void }) {
   const allowsAboveSliderMax = label === "Length" || label === "Width" || label === "Height";
   const isLength = propertyUsesLengthUnit(label);
   const accuracy = workspace.accuracy;
@@ -429,6 +442,7 @@ function RangeProperty({
     const nextModelValue = toModelValue(finiteNext);
     onChange(allowsAboveSliderMax ? Math.max(min, nextModelValue) : clamp(nextModelValue, min, max));
     setEditing(false);
+    onInteractionActiveChange?.(false);
   };
   const handleSliderChange = (nextValue: number) => {
     const next = clamp(Number.isFinite(nextValue) ? nextValue : controlMin, controlMin, controlMax);
@@ -449,6 +463,7 @@ function RangeProperty({
             disabled={disabled}
             inputMode="decimal"
             onFocus={() => {
+              onInteractionActiveChange?.(true);
               setDraft(formatPropertyNumber(controlValue, accuracy, controlStep));
               setEditing(true);
             }}
@@ -474,6 +489,11 @@ function RangeProperty({
           step={controlStep}
           value={sliderValue}
           disabled={disabled}
+          onFocus={() => onInteractionActiveChange?.(true)}
+          onBlur={() => onInteractionActiveChange?.(false)}
+          onPointerDown={() => onInteractionActiveChange?.(true)}
+          onPointerUp={() => onInteractionActiveChange?.(false)}
+          onPointerCancel={() => onInteractionActiveChange?.(false)}
           onChange={(event) => handleSliderChange(Number(event.currentTarget.value))}
         />
       </div>
@@ -481,7 +501,7 @@ function RangeProperty({
   );
 }
 
-function TextProperty({ label, value, disabled, onChange }: TextPropertyConfig & { disabled?: boolean }) {
+function TextProperty({ label, value, disabled, onChange, onInteractionActiveChange }: TextPropertyConfig & { disabled?: boolean; onInteractionActiveChange?: (active: boolean) => void }) {
   return (
     <label className="text-property">
       <span>{label}</span>
@@ -491,6 +511,8 @@ function TextProperty({ label, value, disabled, onChange }: TextPropertyConfig &
         disabled={disabled}
         maxLength={24}
         spellCheck={false}
+        onFocus={() => onInteractionActiveChange?.(true)}
+        onBlur={() => onInteractionActiveChange?.(false)}
         onChange={(event) => onChange(event.currentTarget.value)}
       />
     </label>

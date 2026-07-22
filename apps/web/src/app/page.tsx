@@ -1,16 +1,19 @@
 "use client";
 
-import { Clock3, EllipsisVertical, FileUp, Grid3X3, HomeIcon, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { Clock3, EllipsisVertical, FileUp, FolderKanban, Grid3X3, HomeIcon, List, Pencil, Plus, RefreshCw, Search, Settings, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SketchForgeEditor, importedShapeFromStl, importedShapeFromSvg } from "@/components/SketchForgeEditor";
+import { hydrateEditorHistoryState, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { createLocalId } from "@/lib/localIds";
+import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
+import { importSkfProject } from "@/lib/skfProject";
 import { importExtensionSupported } from "@/lib/stlImport";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
-import type { GridSize, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { GridSize, ProjectAsset, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type AppView = "dashboard" | "editor";
 type ViewMode = "grid" | "list";
-type DashboardSection = "home" | "challenges";
+type DashboardSection = "home" | "shared" | "challenges";
 type DownloadMode = "browser" | "folder";
 
 type DashboardProject = {
@@ -25,6 +28,16 @@ type DashboardProject = {
   revision?: number;
   workspace?: WorkplaneWorkspaceSettings;
   snapGrid?: GridSize;
+  placementElevation?: number;
+  sharedProject?: { fileName: string; revision: string };
+};
+
+type SharedProject = {
+  fileName: string;
+  name: string;
+  updatedAt: number;
+  size: number;
+  revision: string;
 };
 
 type StoredDashboardProject = Partial<DashboardProject> & {
@@ -34,10 +47,18 @@ type StoredDashboardProject = Partial<DashboardProject> & {
 type ProjectShapeCacheEntry = {
   revision: number;
   shapes: WorkplaneShape[];
+  history: EditorHistoryEntry[];
+  historyIndex: number;
+  assets: ProjectAsset[];
 };
 
-type ProjectShapeRecord = ProjectShapeCacheEntry & {
+type ProjectShapeRecord = {
   id: string;
+  revision: number;
+  shapes: WorkplaneShape[];
+  history?: EditorHistoryEntry[];
+  historyIndex?: number;
+  assets?: ProjectAsset[];
   updatedAt: number;
 };
 
@@ -69,6 +90,29 @@ function formatUpdated(timestamp: number) {
   if (age < 3_600_000) return `${Math.max(1, Math.round(age / 60_000))} min ago`;
   if (age < 86_400_000) return "Today";
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(timestamp));
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function projectShapeCacheEntry(
+  revision: number,
+  shapes: WorkplaneShape[],
+  history?: EditorHistoryEntry[],
+  historyIndex?: number,
+  assets: ProjectAsset[] = [],
+): ProjectShapeCacheEntry {
+  const hydrated = hydrateEditorHistoryState(shapes, history, historyIndex);
+  return {
+    revision,
+    shapes: hydrated.entries[hydrated.index]?.shapes ?? shapes,
+    history: hydrated.entries,
+    historyIndex: hydrated.index,
+    assets: dedupeProjectAssets(assets),
+  };
 }
 
 function openProjectShapesDb() {
@@ -105,7 +149,7 @@ async function loadProjectShapes(projectId: string) {
   });
 }
 
-async function saveProjectShapes(projectId: string, shapes: WorkplaneShape[], revision: number) {
+async function saveProjectShapes(projectId: string, entry: ProjectShapeCacheEntry) {
   const database = await openProjectShapesDb();
   return new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(PROJECT_SHAPES_STORE_NAME, "readwrite");
@@ -116,10 +160,10 @@ async function saveProjectShapes(projectId: string, shapes: WorkplaneShape[], re
     };
     existingRequest.onsuccess = () => {
       const existing = existingRequest.result as ProjectShapeRecord | undefined;
-      if (existing && existing.revision > revision) {
+      if (existing && existing.revision > entry.revision) {
         return;
       }
-      store.put({ id: projectId, revision, shapes, updatedAt: Date.now() } satisfies ProjectShapeRecord);
+      store.put({ id: projectId, ...entry, updatedAt: Date.now() } satisfies ProjectShapeRecord);
     };
     transaction.oncomplete = () => {
       database.close();
@@ -165,7 +209,7 @@ function readStoredProjects() {
         const revision = typeof project.revision === "number" ? project.revision : updatedAt;
         const designShapes = Array.isArray(project.designShapes) ? (project.designShapes as WorkplaneShape[]) : null;
         if (designShapes) {
-          legacyShapes[id] = { revision, shapes: designShapes };
+          legacyShapes[id] = projectShapeCacheEntry(revision, designShapes);
         }
         return {
           id,
@@ -179,6 +223,10 @@ function readStoredProjects() {
           revision,
           workspace: normalizeWorkspaceSettings(project.workspace),
           snapGrid: normalizeSnapGrid(project.snapGrid),
+          placementElevation: typeof project.placementElevation === "number" && Number.isFinite(project.placementElevation) ? project.placementElevation : 0,
+          sharedProject: typeof project.sharedProject?.fileName === "string" && typeof project.sharedProject.revision === "string"
+            ? { fileName: project.sharedProject.fileName, revision: project.sharedProject.revision }
+            : undefined,
         };
       });
     return { projects, legacyShapes };
@@ -209,6 +257,8 @@ function mergeProjectForStorage(project: DashboardProject, storedProject?: Dashb
     updatedAt: Math.max(project.updatedAt, storedProject.updatedAt),
     workspace: project.workspace ?? storedProject.workspace,
     snapGrid: project.snapGrid ?? storedProject.snapGrid,
+    placementElevation: project.placementElevation ?? storedProject.placementElevation,
+    sharedProject: project.sharedProject ?? storedProject.sharedProject,
   };
 }
 
@@ -225,6 +275,8 @@ function projectForStorage(project: DashboardProject): DashboardProject {
     revision: project.revision,
     workspace: normalizeWorkspaceSettings(project.workspace),
     snapGrid: normalizeSnapGrid(project.snapGrid),
+    placementElevation: typeof project.placementElevation === "number" && Number.isFinite(project.placementElevation) ? project.placementElevation : 0,
+    sharedProject: project.sharedProject,
   };
 }
 
@@ -251,6 +303,7 @@ function newProject(name: string, index: number, shapeCount = 0): DashboardProje
       customTheme: savedTheme.customTheme,
     },
     snapGrid: DEFAULT_SNAP_GRID,
+    placementElevation: 0,
   };
 }
 
@@ -272,11 +325,31 @@ export default function Home() {
   const [downloadMode, setDownloadMode] = useState<DownloadMode>("browser");
   const [downloadFolder, setDownloadFolder] = useState("");
   const [dashboardNotice, setDashboardNotice] = useState("");
+  const [sharedProjects, setSharedProjects] = useState<SharedProject[]>([]);
+  const [sharedProjectsEnabled, setSharedProjectsEnabled] = useState(false);
+  const [sharedProjectsLoading, setSharedProjectsLoading] = useState(false);
   const [projectShapesById, setProjectShapesById] = useState<Record<string, ProjectShapeCacheEntry>>({});
   const projectsJsonRef = useRef("");
   const dashboardImportInputRef = useRef<HTMLInputElement | null>(null);
   const nextProjectRevisionRef = useRef(0);
   const projectShapeSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
+
+  const refreshSharedProjects = useCallback(async () => {
+    if (STATIC_EXPORT_BUILD) return;
+    setSharedProjectsLoading(true);
+    try {
+      const response = await fetch("/api/shared-projects", { cache: "no-store" });
+      const payload = await response.json() as { enabled?: boolean; projects?: SharedProject[]; error?: string };
+      setSharedProjectsEnabled(Boolean(payload.enabled));
+      setSharedProjects(Array.isArray(payload.projects) ? payload.projects : []);
+      if (!response.ok && payload.enabled) setDashboardNotice(payload.error ?? "Could not load shared projects");
+    } catch {
+      setSharedProjectsEnabled(false);
+      setSharedProjects([]);
+    } finally {
+      setSharedProjectsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     document.documentElement.removeAttribute("data-theme");
@@ -291,7 +364,7 @@ export default function Home() {
     if (Object.keys(legacyShapes).length > 0) {
       setProjectShapesById(legacyShapes);
       Object.entries(legacyShapes).forEach(([projectId, entry]) => {
-        void saveProjectShapes(projectId, entry.shapes, entry.revision).catch(() => {
+        void saveProjectShapes(projectId, entry).catch(() => {
           setDashboardNotice("Could not migrate project shapes to larger storage");
         });
       });
@@ -310,6 +383,11 @@ export default function Home() {
     }
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    void refreshSharedProjects();
+  }, [mounted, refreshSharedProjects]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -367,12 +445,10 @@ export default function Home() {
       .then((record) => {
         if (canceled) return;
         const revision = activeProject.revision ?? record?.revision ?? Date.now();
+        const entry = projectShapeCacheEntry(revision, record?.shapes ?? [], record?.history, record?.historyIndex, record?.assets);
         setProjectShapesById((current) => ({
           ...current,
-          [activeProjectId]: {
-            revision,
-            shapes: record?.shapes ?? [],
-          },
+          [activeProjectId]: entry,
         }));
       })
       .catch((error) => {
@@ -380,10 +456,7 @@ export default function Home() {
           setDashboardNotice(error instanceof Error ? error.message : "Could not load project shapes");
           setProjectShapesById((current) => ({
             ...current,
-            [activeProjectId]: {
-              revision: activeProject.revision ?? Date.now(),
-              shapes: [],
-            },
+            [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
           }));
         }
       });
@@ -403,6 +476,12 @@ export default function Home() {
     const filtered = normalizedQuery ? projects.filter((project) => project.name.toLowerCase().includes(normalizedQuery)) : projects;
     return sortMode === "name" ? [...filtered].sort((a, b) => a.name.localeCompare(b.name)) : [...filtered].sort((a, b) => b.updatedAt - a.updatedAt);
   }, [projects, query, sortMode]);
+
+  const visibleSharedProjects = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    const filtered = normalizedQuery ? sharedProjects.filter((project) => project.name.toLowerCase().includes(normalizedQuery)) : sharedProjects;
+    return sortMode === "name" ? [...filtered].sort((a, b) => a.name.localeCompare(b.name)) : [...filtered].sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [query, sharedProjects, sortMode]);
 
   const openEditor = (projectId: string | null, options: { allowMissingFromStorage?: boolean } = {}) => {
     if (projectId && typeof window !== "undefined" && !options.allowMissingFromStorage) {
@@ -471,9 +550,16 @@ export default function Home() {
       });
   }, []);
 
-  const updateProjectShapes = useCallback((snapshot: { projectId: string; shapes: WorkplaneShape[] }) => {
+  const updateProjectShapes = useCallback((snapshot: {
+    projectId: string;
+    shapes: WorkplaneShape[];
+    history: EditorHistoryEntry[];
+    historyIndex: number;
+    assets: ProjectAsset[];
+  }) => {
     const revision = Math.max(Date.now(), nextProjectRevisionRef.current + 1);
     nextProjectRevisionRef.current = revision;
+    const entry = projectShapeCacheEntry(revision, snapshot.shapes, snapshot.history, snapshot.historyIndex, snapshot.assets);
     setProjectShapesById((current) => {
       const existing = current[snapshot.projectId];
       if (existing && existing.revision > revision) {
@@ -481,12 +567,12 @@ export default function Home() {
       }
       return {
         ...current,
-        [snapshot.projectId]: { revision, shapes: snapshot.shapes },
+        [snapshot.projectId]: entry,
       };
     });
 
     const previousSave = projectShapeSaveQueuesRef.current[snapshot.projectId] ?? Promise.resolve();
-    const queuedSave = previousSave.catch(() => undefined).then(() => saveProjectShapes(snapshot.projectId, snapshot.shapes, revision));
+    const queuedSave = previousSave.catch(() => undefined).then(() => saveProjectShapes(snapshot.projectId, entry));
     projectShapeSaveQueuesRef.current[snapshot.projectId] = queuedSave;
 
     void queuedSave
@@ -511,25 +597,29 @@ export default function Home() {
       });
   }, []);
 
-  const updateProjectWorkspace = useCallback((snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
+  const updateProjectWorkspace = useCallback((snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize; placementElevation?: number }) => {
     const version = Date.now();
     const workspace = normalizeWorkspaceSettings(snapshot.workspace);
     const snapGrid = normalizeSnapGrid(snapshot.snap);
-    const nextFingerprint = workplaneSettingsFingerprint(workspace, snapGrid);
+    const placementElevation = typeof snapshot.placementElevation === "number" && Number.isFinite(snapshot.placementElevation)
+      ? snapshot.placementElevation
+      : 0;
+    const nextFingerprint = `${workplaneSettingsFingerprint(workspace, snapGrid)}:${placementElevation}`;
     setProjects((current) => {
       let changed = false;
       const next = current.map((project) => {
         if (project.id !== snapshot.projectId) return project;
-        const currentFingerprint = workplaneSettingsFingerprint(
+        const currentFingerprint = `${workplaneSettingsFingerprint(
           normalizeWorkspaceSettings(project.workspace),
           normalizeSnapGrid(project.snapGrid),
-        );
+        )}:${project.placementElevation ?? 0}`;
         if (currentFingerprint === nextFingerprint) return project;
         changed = true;
         return {
           ...project,
           workspace,
           snapGrid,
+          placementElevation,
           updatedAt: version,
         };
       });
@@ -541,42 +631,168 @@ export default function Home() {
     const project = newProject(name ?? `Untitled design ${projects.length + 1}`, projects.length);
     setProjectShapesById((current) => ({
       ...current,
-      [project.id]: { revision: project.revision ?? project.updatedAt, shapes: [] },
+      [project.id]: projectShapeCacheEntry(project.revision ?? project.updatedAt, []),
     }));
-    void saveProjectShapes(project.id, [], project.revision ?? project.updatedAt).catch(() => {
+    void saveProjectShapes(project.id, projectShapeCacheEntry(project.revision ?? project.updatedAt, [])).catch(() => {
       setDashboardNotice("Could not prepare project shape storage");
     });
     setProjects((current) => [project, ...current]);
     openEditor(project.id, { allowMissingFromStorage: true });
   };
 
-  const importFileFromDashboard = useCallback(
-    async (file: File) => {
-      const isSvg = /\.svg$/i.test(file.name) || file.type === "image/svg+xml";
-      if (!isSvg && !importExtensionSupported(file.name)) {
-        setDashboardNotice("Unsupported file type. Use STL or SVG.");
+  const openSkfProjectFromFile = useCallback(async (file: File, sharedProject?: SharedProject) => {
+    setDashboardNotice(`Validating ${file.name} before opening it as a new project`);
+    try {
+      const restored = await importSkfProject(await file.arrayBuffer());
+      const now = Date.now();
+      const project: DashboardProject = {
+        ...newProject(restored.projectName, projects.length, restored.shapes.length),
+        createdAt: restored.createdAt,
+        updatedAt: now,
+        revision: now,
+        workspace: restored.workspace,
+        snapGrid: restored.snapGrid,
+        placementElevation: restored.placementElevation,
+        sharedProject: sharedProject ? { fileName: sharedProject.fileName, revision: sharedProject.revision } : undefined,
+      };
+      const entry = projectShapeCacheEntry(now, restored.shapes, restored.history, restored.historyIndex, restored.assets);
+      await saveProjectShapes(project.id, entry);
+      setProjectShapesById((current) => ({ ...current, [project.id]: entry }));
+      setProjects((current) => [project, ...current]);
+      setDashboardNotice(sharedProject ? `Opened shared project ${sharedProject.name}; edits autosave locally until you save back to shared` : `Opened ${file.name} as a new editable local project`);
+      openEditor(project.id, { allowMissingFromStorage: true });
+      return { ok: true, message: sharedProject ? `Opened shared project ${sharedProject.name}` : `Opened ${file.name} as a new editable local project` };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not open SketchForge project";
+      setDashboardNotice(message);
+      return { ok: false, message };
+    }
+  }, [projects.length]);
+
+  const openSharedProject = useCallback(async (sharedProject: SharedProject) => {
+    setDashboardNotice(`Opening shared project ${sharedProject.name}`);
+    try {
+      const response = await fetch(`/api/shared-projects?fileName=${encodeURIComponent(sharedProject.fileName)}`, { cache: "no-store" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(payload.error ?? "Could not download shared project");
+      }
+      const revision = response.headers.get("etag")?.replace(/^W\//, "").replace(/^"|"$/g, "") || sharedProject.revision;
+      const file = new File([await response.blob()], sharedProject.fileName, { type: "application/vnd.sketchforge.project+zip" });
+      await openSkfProjectFromFile(file, { ...sharedProject, revision });
+    } catch (error) {
+      setDashboardNotice(error instanceof Error ? error.message : "Could not open shared project");
+    }
+  }, [openSkfProjectFromFile]);
+
+  const saveActiveProjectToShared = useCallback(async ({ exportName, bytes }: { exportName: string; bytes: Uint8Array }) => {
+    const activeProject = projects.find((project) => project.id === activeProjectId);
+    if (!activeProject) throw new Error("Open a local project before saving it to the shared space");
+    const normalizedExportName = exportName.trim() || activeProject.name;
+    const saveBackToSource = Boolean(activeProject.sharedProject && normalizedExportName === activeProject.name);
+    const fileName = saveBackToSource && activeProject.sharedProject
+      ? activeProject.sharedProject.fileName
+      : `${normalizedExportName.replace(/\.skf$/i, "")}.skf`;
+    const headers: Record<string, string> = { "Content-Type": "application/vnd.sketchforge.project+zip" };
+    if (saveBackToSource && activeProject.sharedProject) headers["If-Match"] = `"${activeProject.sharedProject.revision}"`;
+    else headers["If-None-Match"] = "*";
+    const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const response = await fetch(`/api/shared-projects?fileName=${encodeURIComponent(fileName)}`, { method: "POST", headers, body });
+    const payload = await response.json().catch(() => ({})) as { error?: string; project?: SharedProject };
+    if (!response.ok || !payload.project) throw new Error(payload.error ?? "Could not save the shared project");
+    const savedProject = payload.project;
+    setProjects((current) => current.map((project) => project.id === activeProject.id
+      ? { ...project, sharedProject: { fileName: savedProject.fileName, revision: savedProject.revision } }
+      : project));
+    await refreshSharedProjects();
+    return `Saved ${savedProject.name} to the Docker shared project space`;
+  }, [activeProjectId, projects, refreshSharedProjects]);
+
+  const importFilesFromDashboard = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return;
+      const projectFiles = files.filter((file) => /\.skf$/i.test(file.name));
+      if (projectFiles.length) {
+        if (files.length !== 1) {
+          setDashboardNotice("Open one .skf project at a time; import STL, STEP, and SVG geometry separately");
+          return;
+        }
+        await openSkfProjectFromFile(projectFiles[0]);
+        return;
+      }
+      const importedShapes: WorkplaneShape[] = [];
+      const importedAssets: ProjectAsset[] = [];
+      const importedFileNames: string[] = [];
+      const failures: Array<{ fileName: string; reason: string }> = [];
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const sourceFormat = sourceFormatForFileName(file.name) ?? (file.type === "image/svg+xml" ? "svg" : null);
+        const isSvg = sourceFormat === "svg";
+        const isStep = sourceFormat === "step";
+        if (!sourceFormat || sourceFormat === "obj" || (!isSvg && !isStep && !importExtensionSupported(file.name))) {
+          failures.push({ fileName: file.name, reason: "Unsupported file type" });
+          continue;
+        }
+
+        setDashboardNotice(`Importing ${index + 1} of ${files.length}: ${file.name}`);
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          const parsedShape = isStep
+            ? await import("@/lib/stepImport").then(({ importedShapeFromStep }) => importedShapeFromStep(file.name, buffer))
+            : isSvg
+              ? importedShapeFromSvg(file.name, new TextDecoder().decode(bytes))
+              : importedShapeFromStl(file.name, buffer);
+          const asset = await projectAssetFromBytes(file.name, sourceFormat, bytes, file.type);
+          importedShapes.push(attachProjectAsset(parsedShape, asset.id));
+          importedAssets.push(asset);
+          importedFileNames.push(file.name);
+        } catch (error) {
+          failures.push({
+            fileName: file.name,
+            reason: error instanceof Error ? error.message : "Could not read file",
+          });
+        }
+      }
+
+      const failureDetails = failures
+        .slice(0, 3)
+        .map((failure) => `${failure.fileName}: ${failure.reason}`)
+        .join("; ");
+      const remainingFailureCount = Math.max(0, failures.length - 3);
+      const failureSummary = failures.length
+        ? ` Failed: ${failureDetails}${remainingFailureCount ? `; plus ${remainingFailureCount} more` : ""}`
+        : "";
+
+      if (!importedShapes.length) {
+        setDashboardNotice(files.length === 1 && failures[0] ? failures[0].reason : `Could not import any of the ${files.length} selected files.${failureSummary}`);
         return;
       }
 
       try {
-        const shape = isSvg
-          ? importedShapeFromSvg(file.name, await file.text())
-          : importedShapeFromStl(file.name, await file.arrayBuffer());
-        const project = newProject(projectNameFromFileName(file.name), projects.length, 1);
+        const projectName = importedShapes.length === 1
+          ? projectNameFromFileName(importedFileNames[0])
+          : `Imported design (${importedShapes.length} files)`;
+        const project = newProject(projectName, projects.length, importedShapes.length);
         const revision = project.revision ?? project.updatedAt;
-        await saveProjectShapes(project.id, [shape], revision);
+        const entry = projectShapeCacheEntry(revision, importedShapes, undefined, undefined, dedupeProjectAssets(importedAssets));
+        await saveProjectShapes(project.id, entry);
         setProjectShapesById((current) => ({
           ...current,
-          [project.id]: { revision, shapes: [shape] },
+          [project.id]: entry,
         }));
-        setDashboardNotice(`Imported ${file.name}`);
+        const successSummary = importedShapes.length === 1 && files.length === 1
+          ? `Imported ${files[0].name}`
+          : `Imported ${importedShapes.length} of ${files.length} files`;
+        setDashboardNotice(`${successSummary}.${failureSummary}`.trim());
         setProjects((current) => [project, ...current]);
         openEditor(project.id, { allowMissingFromStorage: true });
       } catch (error) {
-        setDashboardNotice(error instanceof Error ? error.message : `Could not import ${file.name}`);
+        setDashboardNotice(error instanceof Error ? error.message : "Could not create a project for the imported files");
       }
     },
-    [projects.length],
+    [openSkfProjectFromFile, projects.length],
   );
 
   const openLatestProject = () => {
@@ -651,11 +867,12 @@ export default function Home() {
         ref={dashboardImportInputRef}
         className="hidden-file-input"
         type="file"
-        accept=".stl,.svg,image/svg+xml"
+        multiple
+        accept=".skf,.stl,.step,.stp,.svg,image/svg+xml"
         onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          if (file) {
-            void importFileFromDashboard(file);
+          const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
+          if (files.length) {
+            void importFilesFromDashboard(files);
           }
           event.currentTarget.value = "";
         }}
@@ -669,6 +886,9 @@ export default function Home() {
           projects={visibleProjects}
           query={query}
           settingsOpen={settingsOpen}
+          sharedProjects={visibleSharedProjects}
+          sharedProjectsEnabled={sharedProjectsEnabled}
+          sharedProjectsLoading={sharedProjectsLoading}
           staticExportBuild={STATIC_EXPORT_BUILD}
           sortMode={sortMode}
           viewMode={viewMode}
@@ -683,10 +903,17 @@ export default function Home() {
             setDashboardNotice("");
           }}
           onDashboardHome={() => setDashboardSection("home")}
+          onOpenSharedProject={(project) => void openSharedProject(project)}
           onOpenProject={openEditor}
           onOpenSettings={() => setSettingsOpen(true)}
           onQueryChange={setQuery}
           onRenameProject={renameProject}
+          onRefreshSharedProjects={() => void refreshSharedProjects()}
+          onSharedProjects={() => {
+            setDashboardSection("shared");
+            setDashboardNotice("");
+            void refreshSharedProjects();
+          }}
           onSortModeChange={setSortMode}
           onViewModeChange={setViewMode}
           onWorkspace={openLatestProject}
@@ -695,16 +922,25 @@ export default function Home() {
       {editorStarted && canRenderEditor ? (
         <div className={view === "editor" ? "editor-stage active" : "editor-stage"} aria-hidden={view !== "editor"}>
           <SketchForgeEditor
+            initialAssets={activeProjectShapeEntry?.assets ?? []}
             initialShapes={activeProjectShapeEntry?.shapes ?? []}
+            initialHistory={activeProjectShapeEntry?.history}
+            initialHistoryIndex={activeProjectShapeEntry?.historyIndex}
             initialSnap={activeProject?.snapGrid ?? DEFAULT_SNAP_GRID}
             initialWorkspace={activeProject?.workspace ?? DEFAULT_WORKPLANE_WORKSPACE}
+            initialPlacementElevation={activeProject?.placementElevation ?? 0}
             onHome={openDashboard}
+            onOpenSkfProjectFile={openSkfProjectFromFile}
+            onSaveSharedProject={saveActiveProjectToShared}
             onProjectShapesChange={updateProjectShapes}
             onProjectSnapshot={updateProjectSnapshot}
             onProjectWorkspaceChange={updateProjectWorkspace}
             projectId={activeProjectId}
             projectName={activeProject?.name}
+            projectCreatedAt={activeProject?.createdAt}
+            projectModifiedAt={activeProject?.updatedAt}
             projectRevision={activeProjectShapeEntry?.revision ?? activeProject?.revision ?? 0}
+            sharedProjectsEnabled={sharedProjectsEnabled}
           />
         </div>
       ) : null}
@@ -720,6 +956,9 @@ function Dashboard({
   projects,
   query,
   settingsOpen,
+  sharedProjects,
+  sharedProjectsEnabled,
+  sharedProjectsLoading,
   staticExportBuild,
   sortMode,
   viewMode,
@@ -731,10 +970,13 @@ function Dashboard({
   onImportFile,
   onChallenges,
   onDashboardHome,
+  onOpenSharedProject,
   onOpenProject,
   onOpenSettings,
   onQueryChange,
   onRenameProject,
+  onRefreshSharedProjects,
+  onSharedProjects,
   onSortModeChange,
   onViewModeChange,
   onWorkspace,
@@ -746,6 +988,9 @@ function Dashboard({
   projects: DashboardProject[];
   query: string;
   settingsOpen: boolean;
+  sharedProjects: SharedProject[];
+  sharedProjectsEnabled: boolean;
+  sharedProjectsLoading: boolean;
   staticExportBuild: boolean;
   sortMode: string;
   viewMode: ViewMode;
@@ -757,10 +1002,13 @@ function Dashboard({
   onImportFile: () => void;
   onChallenges: () => void;
   onDashboardHome: () => void;
+  onOpenSharedProject: (project: SharedProject) => void;
   onOpenProject: (projectId: string) => void;
   onOpenSettings: () => void;
   onQueryChange: (value: string) => void;
   onRenameProject: (projectId: string, name: string) => void;
+  onRefreshSharedProjects: () => void;
+  onSharedProjects: () => void;
   onSortModeChange: (value: string) => void;
   onViewModeChange: (value: ViewMode) => void;
   onWorkspace: () => void;
@@ -825,6 +1073,12 @@ function Dashboard({
               <HomeIcon size={20} />
               <span>Home</span>
             </button>
+            {sharedProjectsEnabled ? (
+              <button className={`dashboard-nav-item ${dashboardSection === "shared" ? "active" : ""}`} type="button" aria-label="Shared projects" title="Shared projects" onClick={onSharedProjects}>
+                <FolderKanban size={20} />
+                <span>Shared</span>
+              </button>
+            ) : null}
             <button className={`dashboard-nav-item ${dashboardSection === "challenges" ? "active" : ""}`} type="button" aria-label="Challenges" title="Challenges" onClick={onChallenges}>
               <SlidersHorizontal size={20} />
               <span>Challenges</span>
@@ -836,11 +1090,44 @@ function Dashboard({
           </button>
         </aside>
 
-        <section className="dashboard-main" aria-label={dashboardSection === "challenges" ? "Challenges" : "Dashboard"}>
+        <section className="dashboard-main" aria-label={dashboardSection === "challenges" ? "Challenges" : dashboardSection === "shared" ? "Shared projects" : "Dashboard"}>
           {dashboardSection === "challenges" ? (
             <div className="dashboard-coming-soon" role="status">
               <strong>Coming soon</strong>
             </div>
+          ) : dashboardSection === "shared" ? (
+            <>
+              {dashboardNotice ? <div className="dashboard-import-notice" role="status">{dashboardNotice}</div> : null}
+              <div className="dashboard-section-header shared-projects-header">
+                <div>
+                  <h1>Shared projects</h1>
+                  <span>{sharedProjects.length} available from Docker storage</span>
+                </div>
+                <button className="shared-projects-refresh" type="button" onClick={onRefreshSharedProjects} disabled={sharedProjectsLoading}>
+                  <RefreshCw size={16} className={sharedProjectsLoading ? "spinning" : undefined} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+              {sharedProjects.length > 0 ? (
+                <div className={viewMode === "grid" ? "project-grid" : "project-list"}>
+                  {sharedProjects.map((project, index) => (
+                    <article className="project-card shared-project-card" key={project.fileName}>
+                      <button className="project-card-open" type="button" onClick={() => onOpenSharedProject(project)}>
+                        <ProjectPreview accent={PROJECT_ACCENTS[index % PROJECT_ACCENTS.length]} />
+                        <span className="project-card-title">{project.name}</span>
+                        <span className="project-card-meta">{formatUpdated(project.updatedAt)} - {formatFileSize(project.size)}</span>
+                      </button>
+                      <span className="shared-project-badge">Shared</span>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="project-empty">
+                  <strong>{sharedProjectsLoading ? "Loading shared projects" : "No shared projects yet"}</strong>
+                  <span>Save an SKF project to the shared space from the Export window.</span>
+                </div>
+              )}
+            </>
           ) : (
             <>
               <div className="dashboard-actions-band">
@@ -854,7 +1141,7 @@ function Dashboard({
                   <span className="dashboard-action-icon">
                     <FileUp size={24} strokeWidth={2.4} />
                   </span>
-                  <span>Import STL/SVG</span>
+                  <span>Open SKF or import geometry</span>
                 </button>
                 <button className="dashboard-action-tile" type="button" onClick={onWorkspace}>
                   <span className="dashboard-action-icon">
@@ -1033,7 +1320,7 @@ function Dashboard({
               disabled={staticExportBuild || downloadMode !== "folder"}
               value={downloadFolder}
               onChange={(event) => onDownloadFolderChange(event.currentTarget.value)}
-              placeholder="C:\\Users\\spiro\\Downloads"
+              placeholder="C:\\Users\\username\\Downloads"
             />
           </label>
         </section>

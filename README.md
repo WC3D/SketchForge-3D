@@ -16,14 +16,14 @@
 
   <p>
     <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-16a34a"></a>
-    <a href="https://github.com/Formsmith746/SketchForge-3D/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Formsmith746/SketchForge-3D?style=social"></a>
-    <a href="https://github.com/sponsors/Formsmith746"><img alt="GitHub Sponsors" src="https://img.shields.io/github/sponsors/Formsmith746?label=sponsor&logo=githubsponsors&color=bf3989"></a>
+    <a href="https://github.com/Formsmith746/SketchForge-3D/stargazers"><img alt="Star SketchForge on GitHub" src="docs/media/badges/github-star.svg"></a>
+    <a href="https://github.com/sponsors/Formsmith746"><img alt="Sponsor SketchForge on GitHub" src="docs/media/badges/github-sponsor.svg"></a>
     <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
-    <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-2563eb">
+    <img alt="Version 0.6.5" src="docs/media/badges/version-0.6.5.svg">
   </p>
 </div>
 
-![SketchForge editor showing a selected box on the workplane](docs/media/sketchforge-editor-v0.6.png)
+![SketchForge editor showing a selected box on the workplane](docs/media/sketchforge-editor-v0.6.5.png)
 
 ## Why SketchForge
 
@@ -115,7 +115,11 @@ docker compose -f deploy/docker/compose-ghcr.yaml up -d
 #### Standalone (Prebuilt)
 
 ```bash
-docker run -d --name sketchforge --restart unless-stopped -p 3000:80 ghcr.io/formsmith746/sketchforge-3d:latest
+docker run -d --name sketchforge --restart unless-stopped \
+  -p 3000:3000 \
+  -e SKETCHFORGE_SHARED_PROJECTS_DIR=/data/projects \
+  -v sketchforge-shared-projects:/data/projects \
+  ghcr.io/formsmith746/sketchforge-3d:latest
 ```
 
 After running, open this on the same computer:
@@ -125,6 +129,27 @@ http://127.0.0.1:3000/
 ```
 
 If that works, SketchForge is running.
+
+### Shared Docker Projects
+
+Docker deployments include a shared `.skf` project library. Private projects still autosave in each user's browser. The **Shared** dashboard section lists files stored in `/data/projects`, and **Export → SKF → Save to shared** writes the current project there.
+
+Compose uses the persistent `sketchforge-shared-projects` volume by default. To use a directory on the Docker host instead, set `SKETCHFORGE_SHARED_PROJECTS_VOLUME` before starting Compose:
+
+Windows PowerShell:
+
+```powershell
+$env:SKETCHFORGE_SHARED_PROJECTS_VOLUME = "C:/SketchForge/shared-projects"
+docker compose -f deploy/docker/compose.yaml up --build -d
+```
+
+Linux or macOS:
+
+```bash
+SKETCHFORGE_SHARED_PROJECTS_VOLUME=/srv/sketchforge-projects docker compose -f deploy/docker/compose.yaml up --build -d
+```
+
+Opening a shared file creates a private local working copy. Saving back checks the server revision first; if another user has changed the file, SketchForge refuses to overwrite it and asks the user to reload or save with another name. This is shared file storage, not simultaneous live editing.
 
 ### Let Other Computers Join
 

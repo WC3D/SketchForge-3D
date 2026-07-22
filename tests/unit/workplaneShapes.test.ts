@@ -5,6 +5,7 @@ import {
   cleanNearZero,
   cleanRotationDegrees,
   fallbackSolidColor,
+  meshYawDegrees,
   mirroredAxisCount,
   mirrorSign,
   normalizeDegrees,
@@ -48,6 +49,17 @@ describe("workplane shape helpers", () => {
     expect(cleanRotationDegrees(-0.2)).toBe(0);
     expect(cleanRotationDegrees(359.8)).toBe(0);
     expect(cleanRotationDegrees(12.34)).toBe(12.3);
+  });
+
+  it("preserves the meaningful yaw of low-sided circular primitives", () => {
+    const triangularPrism = shape({ kind: "cylinder", width: 10, depth: 10, sides: 3 });
+
+    expect(meshYawDegrees({ ...triangularPrism, rotation: 30 })).toBeCloseTo(30);
+    expect(meshYawDegrees({ ...triangularPrism, rotation: 150 })).toBeCloseTo(30);
+    expect(meshYawDegrees({ ...triangularPrism, rotation: 90 })).toBeCloseTo(-30);
+    expect(meshYawDegrees({ ...triangularPrism, width: 12, rotation: 150 })).toBe(150);
+    expect(meshYawDegrees({ ...triangularPrism, kind: "box", rotation: 30 })).toBe(30);
+    expect(meshYawDegrees({ ...triangularPrism, sides: 96, rotation: 90 })).toBe(0);
   });
 
   it("cleans near-zero values and derives dimensions", () => {
@@ -166,5 +178,26 @@ describe("workplane shape helpers", () => {
     ]);
     expect(resizedImportedMeshPositions({ ...modified, edgeResizeMode: "scale" })[3]).toBe(-18);
     expect(resizedImportedCoordinates(modified, [-9, 1, 0, 9, 19, 0])).toEqual([-19, 1, 0, 19, 39, 0]);
+  });
+
+  it("uses child edge features when preserving the size of grouped treatments", () => {
+    const grouped = shape({
+      kind: "mesh",
+      edgeResizeMode: "preserve",
+      importedMesh: {
+        positions: [-10, 0, 0, -8, 2, 0, 8, 18, 0, 10, 20, 0],
+        baseWidth: 20,
+        baseDepth: 20,
+        baseHeight: 20,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+      groupedShapes: [shape({ edgeTreatments: [{ kind: "fillet", amount: 2, edgeCount: 1 }] })],
+      width: 40,
+      height: 40,
+    });
+
+    expect(preservesEdgeTreatmentSize(grouped)).toBe(true);
+    expect(resizedImportedMeshPositions(grouped)).toEqual([-20, 0, 0, -18, 2, 0, 18, 38, 0, 20, 40, 0]);
   });
 });
