@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import { formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay, normalizeScaleForUnits, scaleOptionsForUnits } from "@/lib/measurementUnits";
-import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationRequired, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
 
 describe("workplane settings helpers", () => {
   it("accepts known snap grid values and falls back for unknown values", () => {
@@ -101,5 +101,13 @@ describe("workplane settings helpers", () => {
     expect(hydratedCommit).toEqual({ shouldSync: false, pendingFingerprint: null });
 
     expect(workspaceHydrationSyncDecision(hydratedCommit.pendingFingerprint, projectTwo).shouldSync).toBe(true);
+  });
+
+  it("does not rehydrate value-equivalent workspace prop references", () => {
+    const fingerprint = workplaneSettingsFingerprint(DEFAULT_WORKPLANE_WORKSPACE, DEFAULT_SNAP_GRID);
+
+    expect(workspaceHydrationRequired(false, fingerprint, fingerprint, fingerprint)).toBe(false);
+    expect(workspaceHydrationRequired(true, fingerprint, fingerprint, fingerprint)).toBe(true);
+    expect(workspaceHydrationRequired(false, fingerprint, fingerprint, `${fingerprint}-changed`)).toBe(true);
   });
 });

@@ -91,3 +91,12 @@ export function workspaceHydrationSyncDecision(pendingFingerprint: string | null
     pendingFingerprint: currentFingerprint === pendingFingerprint ? null : pendingFingerprint,
   };
 }
+
+export function workspaceHydrationRequired(
+  keyChanged: boolean,
+  lastSyncedFingerprint: string,
+  currentFingerprint: string,
+  nextFingerprint: string,
+) {
+  return keyChanged || lastSyncedFingerprint !== nextFingerprint || currentFingerprint !== nextFingerprint;
+}

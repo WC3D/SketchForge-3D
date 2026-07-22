@@ -17,7 +17,7 @@ import optimerBoldFontJson from "three/examples/fonts/optimer_bold.typeface.json
 import { AlignOverlay, MirrorOverlay, type AlignOverlayState, type MirrorOverlayState } from "@/components/workplane/ActionOverlays";
 import { ShapeInspector, SnapGridControl, type ShapeInspectorUpdateOptions } from "@/components/workplane/ShapeInspector";
 import { WorkspaceSettingsModal } from "@/components/workplane/WorkspaceSettingsModal";
-import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint, workspaceHydrationRequired, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
 import { interiorWorkplaneGridCoordinates, workplaneGridPalette, WORKPLANE_LINE_ELEVATION } from "@/lib/workplaneGrid";
 import { cleanNearZero, cleanRotationDegrees, fallbackSolidColor, mirroredAxisCount, mirrorSign, preservesEdgeTreatmentSize, proportionalResizeScale, resizedImportedCoordinates, resizedImportedMeshPositions, resizedShapeSize, shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 import { sphereTessellation } from "@/lib/sphereTessellation";
@@ -1686,7 +1686,8 @@ export function WorkplaneViewport({
 
   useLayoutEffect(() => {
     const nextKey = workspaceSettingsKey ?? null;
-    if (workspaceSettingsKeyRef.current !== nextKey) {
+    const keyChanged = workspaceSettingsKeyRef.current !== nextKey;
+    if (keyChanged) {
       workspaceSettingsKeyRef.current = nextKey;
       lastWorkspaceSettingsSyncRef.current = "";
     }
@@ -1695,6 +1696,10 @@ export function WorkplaneViewport({
     const nextSnap = savedDefault?.snap ?? normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID);
     const nextWorkspace = savedDefault?.workspace ?? normalizeWorkspaceSettings(initialWorkspace);
     const nextFingerprint = workplaneSettingsFingerprint(nextWorkspace, nextSnap);
+    const currentFingerprint = workplaneSettingsFingerprint(workspaceRef.current, snapRef.current);
+    if (!workspaceHydrationRequired(keyChanged, lastWorkspaceSettingsSyncRef.current, currentFingerprint, nextFingerprint)) {
+      return;
+    }
     // Prop hydration must not echo back to the parent. Parent persistence creates
     // new object references even when the values are unchanged, which previously
     // caused this effect and its callback effect to update each other indefinitely.
