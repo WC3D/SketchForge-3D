@@ -2905,6 +2905,10 @@ button {
   cursor: pointer;
 }
 
+.sketch-segments path.constrained {
+  stroke: #087d89;
+}
+
 .sketch-segments path:hover,
 .sketch-segments path.selected {
   stroke: #ff8a00;
@@ -2931,6 +2935,115 @@ button {
   stroke: #169fce;
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+}
+
+.sketch-rect-preview > rect {
+  fill: rgba(22, 159, 206, 0.08);
+  stroke: #169fce;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-polygon-preview > path {
+  fill: rgba(22, 159, 206, 0.08);
+  stroke: #169fce;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-polygon-preview > circle.center {
+  fill: var(--background);
+  stroke: #169fce;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-toolbar-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--border, rgba(0, 0, 0, 0.12));
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.sketch-polygon-sides-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.sketch-polygon-side-btn {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  border-radius: 3px;
+  background: var(--background, #fff);
+  color: var(--foreground, #333);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.sketch-polygon-side-btn:hover:not(:disabled) {
+  background: var(--hover, rgba(0, 0, 0, 0.05));
+}
+
+.sketch-polygon-side-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sketch-polygon-side-count {
+  min-width: 18px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground, #333);
+  user-select: none;
+}
+
+.sketch-text-preview {
+  fill: rgba(22, 159, 206, 0.6);
+  pointer-events: none;
+}
+
+.sketch-text-item {
+  fill: var(--foreground, #333);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sketch-text-item:hover {
+  fill: #169fce;
+}
+
+.sketch-text-input-overlay {
+  pointer-events: auto;
+}
+
+.sketch-text-input {
+  border: 2px solid #169fce;
+  border-radius: 4px;
+  background: var(--background, #fff);
+  color: var(--foreground, #333);
+  font-size: 14px;
+  padding: 4px 8px;
+  outline: none;
+  min-width: 120px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.sketch-text-input:focus {
+  border-color: #0d8ecf;
+  box-shadow: 0 2px 12px rgba(22, 159, 206, 0.3);
 }
 
 .sketch-drag-handles line,
@@ -2969,6 +3082,18 @@ button {
   stroke-width: 2;
 }
 
+.sketch-points circle.fixed {
+  fill: #d8f1e8;
+  stroke: #14755e;
+  stroke-width: 2;
+}
+
+.sketch-constraint-indicators text {
+  fill: #087d89;
+  font-weight: 900;
+  text-anchor: middle;
+}
+
 .sketch-cursor-point {
   fill: #169fce;
   stroke: var(--background);
@@ -2996,6 +3121,16 @@ button {
 
 .sketch-segment-dimensions.preview text {
   fill: #16283a;
+}
+
+.sketch-segment-dimensions.driving rect {
+  fill: #eaf9f5;
+  stroke: #3a9d87;
+}
+
+.sketch-segment-dimensions.driving text {
+  fill: #086954;
+  font-weight: 800;
 }
 
 .sketch-measurement > line {
@@ -3098,6 +3233,12 @@ button {
   border-color: #b9dce9;
 }
 
+.sketch-point-actions button.active {
+  color: #086954;
+  background: #e2f6ef;
+  border-color: #8ccab8;
+}
+
 .sketch-point-actions svg {
   width: 17px;
   height: 17px;
@@ -3107,6 +3248,115 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sketch-constraint-inspector .shape-inspector-header + .property-card {
+  margin-top: 10px;
+}
+
+.sketch-constraint-inspector .property-card-header.static {
+  cursor: default;
+  font-size: 16px;
+}
+
+.sketch-constraint-length-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #586a7d;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.sketch-constraint-length-field > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 8px;
+  color: #7b8da0;
+  background: #fff;
+  border: 1px solid #c7d4df;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.sketch-constraint-length-field input {
+  width: 78px;
+  height: 30px;
+  padding: 0;
+  color: #2f4457;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 14px;
+  font-weight: 750;
+  text-align: right;
+}
+
+.sketch-constraint-length-field > div:focus-within {
+  border-color: #55add8;
+  box-shadow: 0 0 0 3px rgba(0, 156, 222, 0.14);
+}
+
+.sketch-set-dimension,
+.sketch-remove-dimension {
+  height: 34px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sketch-set-dimension {
+  color: #086954;
+  background: #eaf9f5;
+  border: 1px solid #8ccab8;
+}
+
+.sketch-remove-dimension {
+  color: #8f3e31;
+  background: #fff7f5;
+  border: 1px solid #e3b9b0;
+}
+
+.sketch-constraint-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.sketch-constraint-buttons button {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #3f596d;
+  background: #f6f9fb;
+  border: 1px solid #cad8e2;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.sketch-constraint-buttons button span {
+  font-size: 11px;
+}
+
+.sketch-constraint-buttons button.active {
+  color: #086954;
+  background: #e2f6ef;
+  border-color: #72bda8;
+}
+
+.sketch-constraint-buttons button:disabled,
+.sketch-constraint-length-field input:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .sketch-image-inspector .inspector-header-icon.danger:hover {

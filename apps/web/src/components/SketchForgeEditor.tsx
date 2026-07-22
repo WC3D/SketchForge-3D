@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Circle, CircleDot, CloudUpload, Download, FolderOpen, X } from "lucide-react";
+import { Check, Circle, CircleDot, CloudUpload, Download, FolderOpen, Hexagon, Pentagon, Square, Type, X } from "lucide-react";
 import type manifoldModule from "manifold-3d";
 import type { ManifoldToplevel } from "manifold-3d";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +45,7 @@ import {
   ToolbarWorkplaneIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
-import { SketchWorkspace, type SketchCircleDraft, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
+import { SketchWorkspace, type SketchCircleDraft, type SketchMeasurement, type SketchPolygonDraft, type SketchRectDraft, type SketchSelection, type SketchTextDraft, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import { isHexColor, UI_LABELS, VP_LABELS } from "./workplane/WorkspaceSettingsModal";
 import {
@@ -79,6 +79,10 @@ import { appendEditorHistorySnapshot, editorHistoryEntry, editorHistoryForExport
 import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
 import { createLocalId } from "@/lib/localIds";
 import { circleFromPoints, circleSketchGeometry } from "@/lib/sketchCircles";
+import { moveConstrainedSketchPoint, pruneSketchParameters, setSketchPointFixed, setSketchSegmentConstraint, setSketchSegmentLength, solveSketchProfile } from "@/lib/sketchConstraints";
+import { rectFromPoints, rectangleSketchGeometry } from "@/lib/sketchRectangles";
+import { textSketchGeometry } from "@/lib/sketchTextGeometry";
+import { polygonFromPoints, polygonSketchGeometry } from "@/lib/sketchPolygons";
 import { projectExportFileName } from "@/lib/exportNames";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
@@ -218,7 +222,7 @@ const booleanTextFonts: Record<string, Font> = {
 let manifoldRuntimePromise: Promise<ManifoldToplevel> | null = null;
 
 function emptySketchProfile(): SketchProfile {
-  return { points: [], segments: [], images: [] };
+  return { points: [], segments: [], constraints: [], dimensions: [], images: [] };
 }
 
 function cloneSketchProfile(profile: SketchProfile): SketchProfile {
@@ -229,7 +233,10 @@ function cloneSketchProfile(profile: SketchProfile): SketchProfile {
       handleOut: point.handleOut ? { ...point.handleOut } : undefined,
     })),
     segments: profile.segments.map((segment) => ({ ...segment })),
+    constraints: (profile.constraints ?? []).map((constraint) => ({ ...constraint })),
+    dimensions: (profile.dimensions ?? []).map((dimension) => ({ ...dimension })),
     images: (profile.images ?? []).map((image) => ({ ...image })),
+    texts: (profile.texts ?? []).map((text) => ({ ...text })),
   };
 }
 
@@ -5342,6 +5349,10 @@ export function SketchForgeEditor({
   const [sketchMeasureStart, setSketchMeasureStart] = useState<SketchPoint | null>(null);
   const [sketchMeasurement, setSketchMeasurement] = useState<SketchMeasurement>(null);
   const [sketchCircleDraft, setSketchCircleDraft] = useState<SketchCircleDraft | null>(null);
+  const [sketchRectDraft, setSketchRectDraft] = useState<SketchRectDraft | null>(null);
+  const [sketchPolygonDraft, setSketchPolygonDraft] = useState<SketchPolygonDraft | null>(null);
+  const [sketchPolygonSides, setSketchPolygonSides] = useState(6);
+  const [sketchTextDraft, setSketchTextDraft] = useState<SketchTextDraft | null>(null);
   const [editingSketchShapeId, setEditingSketchShapeId] = useState<string | null>(null);
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
@@ -5938,7 +5949,7 @@ export function SketchForgeEditor({
 
   const commitSketchProfile = useCallback(
     (next: SketchProfile, message?: string) => {
-      const snapshot = cloneSketchProfile(next);
+      const snapshot = cloneSketchProfile(solveSketchProfile(next).profile);
       const current = sketchHistoryRef.current;
       const currentIndex = Math.min(sketchHistoryIndexRef.current, Math.max(0, current.length - 1));
       const trimmed = current.slice(0, currentIndex + 1);
@@ -5958,7 +5969,7 @@ export function SketchForgeEditor({
   );
 
   const beginSketch = useCallback((profile?: SketchProfile, editingId: string | null = null) => {
-    const initial = cloneSketchProfile(profile ?? emptySketchProfile());
+    const initial = cloneSketchProfile(solveSketchProfile(profile ?? emptySketchProfile()).profile);
     setToolbarMode("sketch");
     setSketchActive(true);
     setSketchTool(profile?.segments.length ? "select" : "line");
@@ -5973,6 +5984,9 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setEditingSketchShapeId(editingId);
     setNotice(editingId ? "Editing sketch profile" : "Sketch started: place the first point");
   }, []);
@@ -5992,6 +6006,9 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setEditingSketchShapeId(null);
     setNotice("Sketch cancelled");
   }, []);
@@ -6009,6 +6026,9 @@ export function SketchForgeEditor({
     setSketchProfile(cloneSketchProfile(currentHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     setNotice("Sketch undo");
   }, []);
@@ -6026,6 +6046,9 @@ export function SketchForgeEditor({
     setSketchProfile(cloneSketchProfile(currentHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     setNotice("Sketch redo");
   }, []);
@@ -6034,6 +6057,9 @@ export function SketchForgeEditor({
     setSketchTool(tool);
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     if (tool !== "measure") setSketchMeasureStart(null);
     const messages: Record<SketchTool, string> = {
@@ -6042,6 +6068,12 @@ export function SketchForgeEditor({
       smooth: "Smooth curve: click points to build a flowing path",
       "circle-center": "Center circle: choose the center, then a radius point",
       "circle-diameter": "Two-point circle: choose opposite points on the diameter",
+      "rect-corner": "Rectangle: click one corner, then the opposite corner",
+      "rect-center": "Center rectangle: click the center, then a corner",
+      "poly-inscribed": "Inscribed polygon: click center, then a vertex",
+      "poly-circumscribed": "Circumscribed polygon: click center, then an edge midpoint",
+      "poly-edge": "Edge polygon: click two adjacent vertices",
+      text: "Text: click to place a text annotation on the sketch",
       select: "Select: edit sketch geometry or place and scale reference images",
       refine: "Refine: click a segment to add a point, or a point to remove it",
       erase: "Erase: click a point or segment to remove it",
@@ -6141,6 +6173,78 @@ export function SketchForgeEditor({
         });
         return;
       }
+      if (sketchTool === "rect-corner" || sketchTool === "rect-center") {
+        if (!sketchRectDraft || sketchRectDraft.tool !== sketchTool) {
+          setSketchRectDraft({ tool: sketchTool, first: position });
+          setSketchSelection(null);
+          setNotice(sketchTool === "rect-corner" ? "Choose the opposite corner" : "Choose a corner point");
+          return;
+        }
+        const bounds = rectFromPoints(
+          sketchTool === "rect-corner" ? "corner" : "center",
+          sketchRectDraft.first,
+          position,
+        );
+        if (bounds.width < 0.0001 || bounds.height < 0.0001) {
+          setNotice("Rectangle must have non-zero width and height");
+          return;
+        }
+        const rect = rectangleSketchGeometry(bounds);
+        const next: SketchProfile = {
+          ...sketchProfile,
+          points: [...sketchProfile.points, ...rect.points],
+          segments: [...sketchProfile.segments, ...rect.segments],
+          constraints: [
+            ...(sketchProfile.constraints ?? []),
+            ...rect.segments.map((segment, index) => ({
+              id: createLocalId(index % 2 === 0 ? "sketch-horizontal" : "sketch-vertical"),
+              kind: index % 2 === 0 ? "horizontal" as const : "vertical" as const,
+              segmentId: segment.id,
+            })),
+          ],
+        };
+        commitSketchProfile(next, "Rectangle added");
+        setSketchRectDraft(null);
+        setSketchSelection({
+          kind: "multiple",
+          pointIds: rect.points.map((point) => point.id),
+          segmentIds: rect.segments.map((segment) => segment.id),
+        });
+        return;
+      }
+      if (sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge") {
+        if (!sketchPolygonDraft || sketchPolygonDraft.tool !== sketchTool) {
+          setSketchPolygonDraft({ tool: sketchTool, first: position, sides: sketchPolygonSides });
+          setSketchSelection(null);
+          setNotice(sketchTool === "poly-edge" ? "Choose the second vertex" : "Choose a defining point");
+          return;
+        }
+        const mode = sketchTool === "poly-inscribed" ? "inscribed" : sketchTool === "poly-circumscribed" ? "circumscribed" : "edge";
+        const { center, circumR, startAngle } = polygonFromPoints(mode, sketchPolygonDraft.sides, sketchPolygonDraft.first, position);
+        if (circumR < 0.0001) {
+          setNotice("Polygon radius must be greater than zero");
+          return;
+        }
+        const polygon = polygonSketchGeometry(center, circumR, startAngle, sketchPolygonDraft.sides);
+        const next: SketchProfile = {
+          ...sketchProfile,
+          points: [...sketchProfile.points, ...polygon.points],
+          segments: [...sketchProfile.segments, ...polygon.segments],
+        };
+        commitSketchProfile(next, `${sketchPolygonDraft.sides}-sided polygon added`);
+        setSketchPolygonDraft(null);
+        setSketchSelection({
+          kind: "multiple",
+          pointIds: polygon.points.map((point) => point.id),
+          segmentIds: polygon.segments.map((segment) => segment.id),
+        });
+        return;
+      }
+      if (sketchTool === "text") {
+        setSketchTextDraft({ tool: "text", position });
+        setNotice("Type text and press Enter to confirm");
+        return;
+      }
       if (!["line", "bezier", "smooth"].includes(sketchTool)) return;
       const curveKind = sketchTool as NonNullable<SketchSegment["kind"]>;
       const existing = sketchProfile.points.find((point) => Math.hypot(point.x - position.x, point.z - position.z) < 0.0001);
@@ -6163,7 +6267,7 @@ export function SketchForgeEditor({
       setSketchActivePointId(point.id);
       setSketchSelection({ kind: "point", id: point.id });
     },
-    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchCircleDraft, sketchProfile, sketchTool],
+    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchCircleDraft, sketchPolygonDraft, sketchPolygonSides, sketchProfile, sketchRectDraft, sketchTool],
   );
 
   const pressSketchPoint = useCallback(
@@ -6208,11 +6312,11 @@ export function SketchForgeEditor({
           });
         }
       }
-      const next = {
+      const next = pruneSketchParameters({
         ...sketchProfile,
         points: sketchProfile.points.filter((point) => point.id !== id),
         segments: remainingSegments,
-      };
+      });
       commitSketchProfile(next.segments.some((segment) => segment.kind === "smooth") ? withSmoothSketchHandles(next) : next, "Sketch point removed");
       if (sketchActivePointId === id) setSketchActivePointId(null);
       setSketchSelection(null);
@@ -6222,7 +6326,7 @@ export function SketchForgeEditor({
 
   const deleteSketchSegment = useCallback(
     (id: string) => {
-      commitSketchProfile({ ...sketchProfile, segments: sketchProfile.segments.filter((segment) => segment.id !== id) }, "Sketch line removed");
+      commitSketchProfile(pruneSketchParameters({ ...sketchProfile, segments: sketchProfile.segments.filter((segment) => segment.id !== id) }), "Sketch line removed");
       setSketchActivePointId(null);
       setSketchSelection(null);
     },
@@ -6288,36 +6392,57 @@ export function SketchForgeEditor({
     if (sketchSelection.kind === "point") deleteSketchPoint(sketchSelection.id);
     else if (sketchSelection.kind === "segment") deleteSketchSegment(sketchSelection.id);
     else if (sketchSelection.kind === "image") deleteSketchImage(sketchSelection.id);
-    else {
+    else if (sketchSelection.kind === "text") {
+      commitSketchProfile({
+        ...sketchProfile,
+        texts: (sketchProfile.texts ?? []).filter((t) => t.id !== sketchSelection.id),
+      }, "Selected text removed");
+      setSketchActivePointId(null);
+      setSketchSelection(null);
+    } else {
       const pointIds = new Set(sketchSelection.pointIds);
       const segmentIds = new Set(sketchSelection.segmentIds);
       const imageIds = new Set(sketchSelection.imageIds ?? []);
-      commitSketchProfile({
+      const textIds = new Set(sketchSelection.textIds ?? []);
+      commitSketchProfile(pruneSketchParameters({
         ...sketchProfile,
         points: sketchProfile.points.filter((point) => !pointIds.has(point.id)),
         segments: sketchProfile.segments.filter((segment) => !segmentIds.has(segment.id) && !pointIds.has(segment.startId) && !pointIds.has(segment.endId)),
         images: (sketchProfile.images ?? []).filter((image) => !imageIds.has(image.id)),
-      }, "Selected sketch geometry removed");
+        texts: (sketchProfile.texts ?? []).filter((text) => !textIds.has(text.id)),
+      }), "Selected sketch geometry removed");
       setSketchActivePointId(null);
       setSketchSelection(null);
     }
   }, [commitSketchProfile, deleteSketchImage, deleteSketchPoint, deleteSketchSegment, sketchProfile, sketchSelection]);
 
   const moveSketchPoint = useCallback((id: string, position: { x: number; z: number }) => {
-    const current = sketchProfile.points.find((point) => point.id === id);
-    if (!current) return;
-    const deltaX = position.x - current.x;
-    const deltaZ = position.z - current.z;
-    const next = {
-      ...sketchProfile,
-      points: sketchProfile.points.map((point) => point.id === id ? {
-        ...point,
-        ...position,
-        handleIn: point.handleIn ? { x: point.handleIn.x + deltaX, z: point.handleIn.z + deltaZ } : undefined,
-        handleOut: point.handleOut ? { x: point.handleOut.x + deltaX, z: point.handleOut.z + deltaZ } : undefined,
-      } : point),
-    };
-    commitSketchProfile(next, "Sketch point moved");
+    if ((sketchProfile.constraints ?? []).some((constraint) => constraint.kind === "fixed" && constraint.pointId === id)) {
+      setNotice("Fixed points cannot be moved");
+      return;
+    }
+    const result = moveConstrainedSketchPoint(sketchProfile, id, position);
+    commitSketchProfile(result.profile, result.conflicts.length ? "Point moved with constraint conflicts" : "Sketch point moved");
+  }, [commitSketchProfile, sketchProfile]);
+
+  const toggleSketchPointFixed = useCallback((id: string) => {
+    const fixed = (sketchProfile.constraints ?? []).some((constraint) => constraint.kind === "fixed" && constraint.pointId === id);
+    const result = setSketchPointFixed(sketchProfile, id, !fixed, createLocalId);
+    commitSketchProfile(result.profile, fixed ? "Point released" : "Point fixed");
+    setSketchSelection({ kind: "point", id });
+  }, [commitSketchProfile, sketchProfile]);
+
+  const toggleSketchSegmentConstraint = useCallback((id: string, kind: "horizontal" | "vertical") => {
+    const enabled = !(sketchProfile.constraints ?? []).some((constraint) => constraint.kind === kind && constraint.segmentId === id);
+    const result = setSketchSegmentConstraint(sketchProfile, id, kind, enabled, createLocalId);
+    commitSketchProfile(result.profile, `${kind === "horizontal" ? "Horizontal" : "Vertical"} constraint ${enabled ? "added" : "removed"}`);
+    setSketchSelection({ kind: "segment", id });
+  }, [commitSketchProfile, sketchProfile]);
+
+  const updateSketchSegmentLength = useCallback((id: string, value: number | null) => {
+    const result = setSketchSegmentLength(sketchProfile, id, value, createLocalId);
+    commitSketchProfile(result.profile, value === null ? "Driving length removed" : result.conflicts.length ? "Length updated with constraint conflicts" : "Driving length updated");
+    setSketchSelection({ kind: "segment", id });
   }, [commitSketchProfile, sketchProfile]);
 
   const moveSketchHandle = useCallback((id: string, handle: "in" | "out", position: { x: number; z: number }) => {
@@ -6356,14 +6481,14 @@ export function SketchForgeEditor({
     const segment = sketchProfile.segments.find((entry) => entry.id === segmentId);
     if (!segment) return;
     const point: SketchPoint = { id: createLocalId("sketch-point"), ...position, mode: segment.kind === "line" ? "corner" : "smooth" };
-    let next: SketchProfile = {
+    let next: SketchProfile = pruneSketchParameters({
       ...sketchProfile,
       points: [...sketchProfile.points, point],
       segments: sketchProfile.segments.flatMap((entry) => entry.id === segmentId ? [
         { ...entry, id: createLocalId("sketch-segment"), endId: point.id },
         { ...entry, id: createLocalId("sketch-segment"), startId: point.id },
       ] : [entry]),
-    };
+    });
     if (segment.kind === "smooth") next = withSmoothSketchHandles(next);
     commitSketchProfile(next, "Point added to path");
     setSketchSelection({ kind: "point", id: point.id });
@@ -6395,6 +6520,9 @@ export function SketchForgeEditor({
     commitShapes(nextShapes, extruded.id, exact ? existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height" : existing ? "Sketch updated" : "Sketch created at 10 mm height");
     setSketchActive(false);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setEditingSketchShapeId(null);
     setToolbarMode("geometry");
   }, [commitShapes, editingSketchShapeId, shapes, sketchProfile]);
@@ -8268,6 +8396,9 @@ export function SketchForgeEditor({
           event.preventDefault();
           setSketchActivePointId(null);
           setSketchCircleDraft(null);
+          setSketchRectDraft(null);
+          setSketchPolygonDraft(null);
+          setSketchTextDraft(null);
           setSketchSelection(null);
           setNotice("Current sketch chain cleared");
         } else if (event.key === "Delete" || event.key === "Backspace") {
@@ -8464,6 +8595,8 @@ export function SketchForgeEditor({
         mirrorMode={mirrorMode}
         sketchActive={sketchActive}
         sketchTool={sketchTool}
+        sketchPolygonSides={sketchPolygonSides}
+        onSketchPolygonSidesChange={setSketchPolygonSides}
         sketchCanUndo={sketchHistoryIndex > 0}
         sketchCanRedo={sketchHistoryIndex < sketchHistory.length - 1}
         canEditSketch={selectedShapes.length === 1 && Boolean(selectedShape?.sketchProfile)}
@@ -8525,6 +8658,9 @@ export function SketchForgeEditor({
             measurement={sketchMeasurement}
             pendingMeasurementStart={sketchMeasureStart}
             circleDraft={sketchCircleDraft}
+            rectDraft={sketchRectDraft}
+            polygonDraft={sketchPolygonDraft}
+            textDraft={sketchTextDraft}
             initialSnap={initialSnap}
             initialWorkspace={initialWorkspace}
             onPlanePoint={addSketchPlanePoint}
@@ -8533,16 +8669,21 @@ export function SketchForgeEditor({
               setSketchSelection({ kind: "segment", id });
               setSketchActivePointId(null);
             }}
-            onSelectMany={(pointIds, segmentIds, imageIds) => {
-              setSketchSelection(pointIds.length || segmentIds.length || imageIds.length ? { kind: "multiple", pointIds, segmentIds, imageIds } : null);
+            onSelectMany={(pointIds, segmentIds, imageIds, textIds) => {
+              setSketchSelection(pointIds.length || segmentIds.length || imageIds.length || textIds.length ? { kind: "multiple", pointIds, segmentIds, imageIds, textIds } : null);
               setSketchActivePointId(null);
-              const count = pointIds.length + segmentIds.length + imageIds.length;
+              const count = pointIds.length + segmentIds.length + imageIds.length + textIds.length;
               setNotice(count ? `Selected ${count} sketch item${count === 1 ? "" : "s"}` : "Sketch selection cleared");
             }}
             onSelectImage={(id) => {
               setSketchSelection({ kind: "image", id });
               setSketchActivePointId(null);
               setNotice("Sketch image selected");
+            }}
+            onSelectText={(id) => {
+              setSketchSelection({ kind: "text", id });
+              setSketchActivePointId(null);
+              setNotice("Sketch text selected");
             }}
             onUpdateImage={updateSketchImage}
             onDeleteImage={deleteSketchImage}
@@ -8552,7 +8693,32 @@ export function SketchForgeEditor({
             onMoveHandle={moveSketchHandle}
             onInsertPoint={insertSketchPoint}
             onSetPointMode={setSketchPointMode}
+            onTogglePointFixed={toggleSketchPointFixed}
+            onToggleSegmentConstraint={toggleSketchSegmentConstraint}
+            onSetSegmentLength={updateSketchSegmentLength}
             onClearMeasurement={clearSketchMeasurement}
+            onTextSubmit={(text) => {
+              if (!sketchTextDraft) return;
+              const font = booleanTextFonts.Sans ?? booleanTextFonts.Multilanguage;
+              const geometry = textSketchGeometry(text, font, 10, sketchTextDraft.position);
+              const next: SketchProfile = {
+                ...sketchProfile,
+                points: [...sketchProfile.points, ...geometry.points],
+                segments: [...sketchProfile.segments, ...geometry.segments],
+              };
+              commitSketchProfile(next, "Text geometry added to sketch");
+              setSketchTextDraft(null);
+              setSketchSelection({
+                kind: "multiple",
+                pointIds: geometry.points.map((p) => p.id),
+                segmentIds: geometry.segments.map((s) => s.id),
+              });
+              setNotice("Text geometry placed on sketch");
+            }}
+            onTextCancel={() => {
+              setSketchTextDraft(null);
+              setNotice("Text cancelled");
+            }}
           />
         ) : (
           <WorkplaneViewport
@@ -8759,6 +8925,8 @@ function SecondaryToolbar({
   mirrorMode,
   sketchActive,
   sketchTool,
+  sketchPolygonSides,
+  onSketchPolygonSidesChange,
   sketchCanUndo,
   sketchCanRedo,
   canEditSketch,
@@ -8809,6 +8977,8 @@ function SecondaryToolbar({
   mirrorMode: boolean;
   sketchActive: boolean;
   sketchTool: SketchTool;
+  sketchPolygonSides: number;
+  onSketchPolygonSidesChange: (sides: number) => void;
   sketchCanUndo: boolean;
   sketchCanRedo: boolean;
   canEditSketch: boolean;
@@ -9059,8 +9229,30 @@ function SecondaryToolbar({
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "circle-diameter" ? "active" : ""}`} type="button" aria-label="Two Point Circle" title="Two Point Circle" onClick={() => onSketchTool("circle-diameter")}>
                       <Circle aria-hidden="true" />
                     </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "rect-corner" ? "active" : ""}`} type="button" aria-label="Corner Rectangle" title="Corner Rectangle" onClick={() => onSketchTool("rect-corner")}>
+                      <Square aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "rect-center" ? "active" : ""}`} type="button" aria-label="Center Rectangle" title="Center Rectangle" onClick={() => onSketchTool("rect-center")}>
+                      <Square aria-hidden="true" style={{ opacity: 0.6 }} />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge" ? "active" : ""}`} type="button" aria-label="Polygon" title="Polygon" onClick={() => onSketchTool("poly-inscribed")}>
+                      <Hexagon aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "text" ? "active" : ""}`} type="button" aria-label="Text" title="Text" onClick={() => onSketchTool("text")}>
+                      <Type aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
+                {sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge" ? (
+                  <div className="toolbar-section">
+                    <div className="toolbar-section-label">Sides</div>
+                    <div className="toolbar-section-tools" style={{ alignItems: "center", gap: 4 }}>
+                      <button type="button" className="toolbar-icon sketch-tool-icon" onClick={() => onSketchPolygonSidesChange(Math.max(3, sketchPolygonSides - 1))} title="Fewer sides">-</button>
+                      <span style={{ fontSize: 12, minWidth: 20, textAlign: "center" }}>{sketchPolygonSides}</span>
+                      <button type="button" className="toolbar-icon sketch-tool-icon" onClick={() => onSketchPolygonSidesChange(Math.min(24, sketchPolygonSides + 1))} title="More sides">+</button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="toolbar-section sketch-edit-section">
                   <div className="toolbar-section-label">Select</div>
                   <div className="toolbar-section-tools">

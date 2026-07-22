@@ -88,6 +88,17 @@ export type SketchSegment = {
   kind?: "line" | "bezier" | "smooth";
 };
 
+export type SketchConstraint =
+  | { id: string; kind: "horizontal" | "vertical"; segmentId: string }
+  | { id: string; kind: "fixed"; pointId: string; x: number; z: number };
+
+export type SketchDimension = {
+  id: string;
+  kind: "length";
+  segmentId: string;
+  value: number;
+};
+
 export type SketchImage = {
   id: string;
   name: string;
@@ -103,10 +114,21 @@ export type SketchImage = {
   lockAspect?: boolean;
 };
 
+export type SketchText = {
+  id: string;
+  text: string;
+  x: number;
+  z: number;
+  fontSize: number;
+};
+
 export type SketchProfile = {
   points: SketchPoint[];
   segments: SketchSegment[];
+  constraints?: SketchConstraint[];
+  dimensions?: SketchDimension[];
   images?: SketchImage[];
+  texts?: SketchText[];
 };
 
 export type EdgeTreatmentFeature = {

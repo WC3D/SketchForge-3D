@@ -94,6 +94,12 @@ describe("SketchForge .skf project packages", () => {
           { id: "s2", startId: "p2", endId: "p3", kind: "bezier" },
           { id: "s3", startId: "p3", endId: "p1", kind: "line" },
         ],
+        constraints: [
+          { id: "fixed-p1", kind: "fixed", pointId: "p1", x: 0, z: 0 },
+          { id: "horizontal-s1", kind: "horizontal", segmentId: "s1" },
+        ],
+        dimensions: [{ id: "length-s1", kind: "length", segmentId: "s1", value: 10 }],
+        texts: [{ id: "label-1", text: "10 mm", x: 5, z: -2, fontSize: 4 }],
       } : undefined,
     }));
 
