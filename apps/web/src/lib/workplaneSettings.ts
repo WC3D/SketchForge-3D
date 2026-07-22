@@ -11,6 +11,7 @@ export const DEFAULT_WORKPLANE_WORKSPACE: WorkplaneWorkspaceSettings = {
   gridBlockSize: 5,
   gridBlockPreset: "5 mm",
   background: "#f8fbfc",
+  themeId: "light",
   showShadows: true,
   showGrid: true,
   cruiseShapes: true,
@@ -57,6 +58,7 @@ export function normalizeWorkspaceSettings(value: unknown, fallback: WorkplaneWo
   const candidate = value && typeof value === "object" ? (value as Partial<WorkplaneWorkspaceSettings>) : {};
   const units = stringOrDefault(candidate.units, fallback.units);
   const themeId = VALID_THEME_IDS.has(candidate.themeId ?? "") ? candidate.themeId : fallback.themeId ?? "light";
+  const customTheme = themeOrDefault(candidate.customTheme, fallback.customTheme);
   return {
     width: numberOrDefault(candidate.width, fallback.width),
     depth: numberOrDefault(candidate.depth, fallback.depth),
@@ -65,7 +67,7 @@ export function normalizeWorkspaceSettings(value: unknown, fallback: WorkplaneWo
     gridBlockPreset: stringOrDefault(candidate.gridBlockPreset, fallback.gridBlockPreset),
     background: stringOrDefault(candidate.background, fallback.background),
     themeId,
-    customTheme: themeOrDefault(candidate.customTheme, fallback.customTheme),
+    ...(customTheme ? { customTheme } : {}),
     showShadows: booleanOrDefault(candidate.showShadows, fallback.showShadows),
     showGrid: booleanOrDefault(candidate.showGrid, fallback.showGrid),
     cruiseShapes: booleanOrDefault(candidate.cruiseShapes, fallback.cruiseShapes),
@@ -88,4 +90,13 @@ export function workspaceHydrationSyncDecision(pendingFingerprint: string | null
     shouldSync: false,
     pendingFingerprint: currentFingerprint === pendingFingerprint ? null : pendingFingerprint,
   };
+}
+
+export function workspaceHydrationRequired(
+  keyChanged: boolean,
+  lastSyncedFingerprint: string,
+  currentFingerprint: string,
+  nextFingerprint: string,
+) {
+  return keyChanged || lastSyncedFingerprint !== nextFingerprint || currentFingerprint !== nextFingerprint;
 }

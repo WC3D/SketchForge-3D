@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Circle, CircleDot, Download, X } from "lucide-react";
+import { Check, Circle, CircleDot, CloudUpload, Download, FolderOpen, Hexagon, Pentagon, Square, Type, X } from "lucide-react";
 import type manifoldModule from "manifold-3d";
 import type { ManifoldToplevel } from "manifold-3d";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +45,7 @@ import {
   ToolbarWorkplaneIcon,
 } from "./icons";
 import { WorkplaneViewport } from "./WorkplaneViewport";
-import { SketchWorkspace, type SketchCircleDraft, type SketchMeasurement, type SketchSelection, type SketchTool } from "./SketchWorkspace";
+import { SketchWorkspace, type SketchCircleDraft, type SketchMeasurement, type SketchPolygonDraft, type SketchRectDraft, type SketchSelection, type SketchTextDraft, type SketchTool } from "./SketchWorkspace";
 import { EdgeModifierPanel } from "./workplane/EdgeModifierPanel";
 import { isHexColor, UI_LABELS, VP_LABELS } from "./workplane/WorkspaceSettingsModal";
 import {
@@ -53,6 +53,7 @@ import {
   cleanNearZero,
   cleanRotationDegrees,
   fallbackSolidColor,
+  meshYawDegrees,
   mirroredAxisCount,
   mirrorSign,
   normalizeDegrees,
@@ -74,15 +75,23 @@ import {
   type CadModifierRequestPhase,
 } from "@/lib/cadModifierRuntime";
 import { cloneWorkplaneShapeSnapshot, compactEdgeTreatmentHistory, edgeTreatmentAppliedFrame, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
-import { appendEditorHistorySnapshot, editorHistoryEntry, hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry, type EditorHistoryState } from "@/lib/editorHistory";
+import { appendEditorHistorySnapshot, editorHistoryEntry, editorHistoryForExport, hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry, type EditorHistoryExportLimit, type EditorHistoryState } from "@/lib/editorHistory";
 import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
 import { createLocalId } from "@/lib/localIds";
 import { circleFromPoints, circleSketchGeometry } from "@/lib/sketchCircles";
+import { moveConstrainedSketchPoint, pruneSketchParameters, setSketchPointFixed, setSketchSegmentConstraint, setSketchSegmentLength, solveSketchProfile } from "@/lib/sketchConstraints";
+import { rectFromPoints, rectangleSketchGeometry } from "@/lib/sketchRectangles";
+import { textSketchGeometry } from "@/lib/sketchTextGeometry";
+import { polygonFromPoints, polygonSketchGeometry } from "@/lib/sketchPolygons";
 import { projectExportFileName } from "@/lib/exportNames";
+import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
+import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
+import { exportSkfProject, SKF_MEDIA_TYPE } from "@/lib/skfProject";
 import { makeShapeFromAsset, sceneShape, toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
 import { importedShapeFromStl, importExtensionSupported } from "@/lib/stlImport";
 import { importedShapeFromSvg, invalidSvgMeshReason } from "@/lib/svgImport";
-import { normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
+import { toSvgProjection, type SvgProjectionLayer } from "@/lib/svgExport";
+import { normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import {
   SKETCHFORGE_MCP_POLL_MS,
   SKETCHFORGE_MCP_ROUTE,
@@ -93,13 +102,16 @@ import {
 } from "@/lib/sketchforgeMcpProtocol";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
 import type { SketchCadBuildResponse } from "@/lib/sketchCadTypes";
-import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ProjectAsset, ShapeAsset, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 import { customThemeWithDefaults, defaultThemes, type AppTheme } from "@/lib/themes";
 
 export { importedShapeFromStl, importedShapeFromSvg };
 
 type TopPanel = "import" | "export" | "tips" | "profile" | "settings" | null;
-type ExportFormat = "stl" | "obj";
+type ExportFormat = "stl" | "obj" | "step" | "svg" | "skf";
+type DirectExportFormat = Exclude<ExportFormat, "step" | "skf">;
+type SkfHistoryLimit = EditorHistoryExportLimit;
+type SkfExportTarget = "download" | "shared";
 type ToolbarMode = "geometry" | "sketch";
 type Vec3 = [number, number, number];
 type MeshData = { name: string; vertices: Vec3[]; faces: [number, number, number][] };
@@ -210,7 +222,7 @@ const booleanTextFonts: Record<string, Font> = {
 let manifoldRuntimePromise: Promise<ManifoldToplevel> | null = null;
 
 function emptySketchProfile(): SketchProfile {
-  return { points: [], segments: [], images: [] };
+  return { points: [], segments: [], constraints: [], dimensions: [], images: [] };
 }
 
 function cloneSketchProfile(profile: SketchProfile): SketchProfile {
@@ -221,7 +233,10 @@ function cloneSketchProfile(profile: SketchProfile): SketchProfile {
       handleOut: point.handleOut ? { ...point.handleOut } : undefined,
     })),
     segments: profile.segments.map((segment) => ({ ...segment })),
+    constraints: (profile.constraints ?? []).map((constraint) => ({ ...constraint })),
+    dimensions: (profile.dimensions ?? []).map((dimension) => ({ ...dimension })),
     images: (profile.images ?? []).map((image) => ({ ...image })),
+    texts: (profile.texts ?? []).map((text) => ({ ...text })),
   };
 }
 
@@ -310,7 +325,89 @@ function pointInSketchPolygon(point: THREE.Vector2, polygon: THREE.Vector2[]) {
   return inside;
 }
 
-function shapeFromSketchProfile(profile: SketchProfile, height: number, existing?: WorkplaneShape | null) {
+async function shapeFromResolvedSketchProfile(
+  profile: SketchProfile,
+  polygons: Array<Array<[number, number]>>,
+  height: number,
+  centerX: number,
+  centerZ: number,
+  existing?: WorkplaneShape | null,
+) {
+  const runtime = await getManifoldRuntime();
+  const disposable: unknown[] = [];
+  try {
+    const section = new runtime.CrossSection(polygons, "EvenOdd");
+    disposable.push(section);
+    const coordinateScale = polygons.reduce(
+      (largest, polygon) => polygon.reduce((polygonLargest, point) => Math.max(polygonLargest, Math.abs(point[0]), Math.abs(point[1])), largest),
+      1,
+    );
+    const simplified = section.simplify(Math.max(1e-7, coordinateScale * 1e-8));
+    disposable.push(simplified);
+    if (simplified.toPolygons().length === 0) throw new Error("The sketch has no filled area after resolving its crossings");
+
+    const solid = simplified.extrude(height);
+    disposable.push(solid);
+    if (solid.status() !== "NoError" || solid.numTri() < 1) {
+      throw new Error("The crossing sketch could not be converted into a valid solid");
+    }
+
+    const manifoldPositions = manifoldMeshToPositions(solid.getMesh());
+    const positions = new Array<number>(manifoldPositions.length);
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index + 2 < manifoldPositions.length; index += 3) {
+      const x = manifoldPositions[index];
+      const y = manifoldPositions[index + 2];
+      const z = -manifoldPositions[index + 1];
+      positions[index] = x;
+      positions[index + 1] = y;
+      positions[index + 2] = z;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z);
+    }
+    const localCenterX = (minX + maxX) / 2;
+    const localCenterZ = (minZ + maxZ) / 2;
+    for (let index = 0; index + 2 < positions.length; index += 3) {
+      positions[index] -= localCenterX;
+      positions[index + 2] -= localCenterZ;
+    }
+    const meshWidth = Math.max(0.01, maxX - minX);
+    const meshDepth = Math.max(0.01, maxZ - minZ);
+    return canonicalizeShape({
+      id: existing?.id ?? createLocalId("sketch-extrusion"),
+      name: existing?.name ?? "Sketch extrusion",
+      kind: "mesh",
+      color: existing?.color ?? "#d41721",
+      hole: existing?.hole,
+      x: centerX + localCenterX,
+      z: centerZ + localCenterZ,
+      elevation: 0,
+      size: Math.max(meshWidth, meshDepth),
+      width: meshWidth,
+      depth: meshDepth,
+      height,
+      rotation: 0,
+      importedMesh: {
+        positions,
+        baseWidth: meshWidth,
+        baseDepth: meshDepth,
+        baseHeight: height,
+        triangleCount: Math.floor(positions.length / 9),
+        sourceFormat: "json",
+      },
+      sketchProfile: cloneSketchProfile(profile),
+    } satisfies WorkplaneShape);
+  } finally {
+    [...new Set(disposable)].reverse().forEach(disposeManifold);
+  }
+}
+
+async function shapeFromSketchProfile(profile: SketchProfile, height: number, existing?: WorkplaneShape | null) {
   const closedPaths = orderedSketchPaths(profile).filter((path) => path.closed);
   if (closedPaths.length === 0) return null;
   const profilePoints = closedPaths.flatMap((path) => path.points);
@@ -348,6 +445,25 @@ function shapeFromSketchProfile(profile: SketchProfile, height: number, existing
     const polygon = outline.extractPoints(16).shape;
     return { outline, polygon, area: Math.abs(THREE.ShapeUtils.area(polygon)) };
   });
+  const hasCurves = profile.segments.some((segment) => segment.kind === "bezier" || segment.kind === "smooth");
+  const longestHandle = profile.points.reduce((longest, point) => Math.max(
+    longest,
+    point.handleIn ? Math.hypot(point.handleIn.x - point.x, point.handleIn.z - point.z) : 0,
+    point.handleOut ? Math.hypot(point.handleOut.x - point.x, point.handleOut.z - point.z) : 0,
+  ), 0);
+  const curveScale = Math.max(width, depth, longestHandle * 2);
+  const curveSegments = hasCurves ? Math.min(256, Math.max(32, Math.ceil(curveScale * 1.25))) : 1;
+  const sampledPolygons = outlineRecords.map((record) => record.outline.extractPoints(curveSegments).shape);
+  if (findSketchOutlineIntersection(sampledPolygons)) {
+    return shapeFromResolvedSketchProfile(
+      profile,
+      sampledPolygons.map((polygon) => polygon.map((point) => [point.x, point.y] as [number, number])),
+      safeHeight,
+      centerX,
+      centerZ,
+      existing,
+    );
+  }
   const sortedOutlines = [...outlineRecords].sort((a, b) => b.area - a.area);
   const outlines: THREE.Shape[] = [];
   sortedOutlines.forEach((record) => {
@@ -360,14 +476,6 @@ function shapeFromSketchProfile(profile: SketchProfile, height: number, existing
     if (parent) parent.outline.holes.push(record.outline);
     else outlines.push(record.outline);
   });
-  const hasCurves = profile.segments.some((segment) => segment.kind === "bezier" || segment.kind === "smooth");
-  const longestHandle = profile.points.reduce((longest, point) => Math.max(
-    longest,
-    point.handleIn ? Math.hypot(point.handleIn.x - point.x, point.handleIn.z - point.z) : 0,
-    point.handleOut ? Math.hypot(point.handleOut.x - point.x, point.handleOut.z - point.z) : 0,
-  ), 0);
-  const curveScale = Math.max(width, depth, longestHandle * 2);
-  const curveSegments = hasCurves ? Math.min(256, Math.max(32, Math.ceil(curveScale * 1.25))) : 1;
   const geometry = new THREE.ExtrudeGeometry(outlines, { depth: safeHeight, bevelEnabled: false, steps: 1, curveSegments });
   geometry.rotateX(-Math.PI / 2);
   geometry.computeVertexNormals();
@@ -481,14 +589,6 @@ async function cadShapeFromSketchProfile(profile: SketchProfile, height: number,
 
 function cleanModelDimension(value: number) {
   return Math.max(MIN_SHAPE_DIMENSION, Number(value.toFixed(MODEL_DIMENSION_PRECISION)));
-}
-
-function meshYawDegrees(shape: WorkplaneShape) {
-  const isRoundPrimitive = !shape.importedMesh && (shape.kind === "cylinder" || shape.kind === "cone");
-  const isCircular = Math.abs(shapeWidth(shape) - shapeDepth(shape)) < 0.0005;
-  // A circular cylinder/cone is invariant around Y. Ignoring that purely visual
-  // yaw keeps its tessellated export at the requested diameter after grouping.
-  return isRoundPrimitive && isCircular ? 0 : shape.rotation;
 }
 
 function parseClipboardShapes(serialized: string) {
@@ -1591,6 +1691,7 @@ async function restoreEdgeTreatmentInShape(shape: WorkplaneShape, path: number[]
       locked: shape.locked,
       hidden: shape.hidden,
       edgeResizeMode: shape.edgeResizeMode,
+      groupOperation: shape.groupOperation,
       edgeTreatments: shape.edgeTreatments,
       edgeTreatmentHistory: shape.edgeTreatmentHistory?.length ? compactEdgeTreatmentHistory(shape.edgeTreatmentHistory) : undefined,
     }),
@@ -2352,6 +2453,36 @@ function toObj(meshes: MeshData[]) {
   return lines.join("\n");
 }
 
+async function toSvg(shapes: WorkplaneShape[], title: string) {
+  const runtime = await getManifoldRuntime();
+  const layers: SvgProjectionLayer[] = [];
+
+  for (const shape of shapes) {
+    const created: ManifoldSolid[] = [];
+    const projectedObjects: unknown[] = [];
+    try {
+      const solid = shapeToManifoldSolid(runtime, shape, created);
+      if (!solid || solid.status() !== "NoError" || solid.numTri() < 1) {
+        throw new Error(`Could not convert ${shape.name} into a watertight SVG outline`);
+      }
+
+      const topView = solid.rotate([90, 0, 0]);
+      if (topView !== solid) created.push(topView);
+      const projection = topView.project();
+      projectedObjects.push(projection);
+      const simplified = projection.simplify(0.00001);
+      if (simplified !== projection) projectedObjects.push(simplified);
+      const polygons = simplified.toPolygons();
+      if (!polygons.length) throw new Error(`Top view of ${shape.name} has no exportable area`);
+      layers.push({ name: shape.name, color: shape.color, polygons });
+    } finally {
+      [...new Set([...projectedObjects, ...created])].reverse().forEach(disposeManifold);
+    }
+  }
+
+  return toSvgProjection(layers, title);
+}
+
 function triggerBrowserDownload(filename: string, content: string, type: string) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -2382,6 +2513,31 @@ async function downloadTextFile(filename: string, content: string, type: string)
   }
 
   triggerBrowserDownload(filename, content, type);
+  return { mode: "browser" };
+}
+
+async function downloadBlobFile(filename: string, blob: Blob): Promise<DownloadResult> {
+  const mode = window.localStorage.getItem(DOWNLOAD_MODE_STORAGE_KEY);
+  const folder = window.localStorage.getItem(DOWNLOAD_FOLDER_STORAGE_KEY)?.trim() ?? "";
+  if (!STATIC_EXPORT_BUILD && mode === "folder" && folder) {
+    const formData = new FormData();
+    formData.set("file", blob, filename);
+    formData.set("filename", filename);
+    formData.set("folder", folder);
+    const response = await fetch("/api/local-download", { method: "POST", body: formData });
+    const payload = (await response.json().catch(() => null)) as { error?: string; path?: string } | null;
+    if (!response.ok || !payload?.path) throw new Error(payload?.error ?? "Could not save export");
+    return { mode: "folder", path: payload.path };
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { mode: "browser" };
 }
 
@@ -5050,36 +5206,51 @@ function readMcpEditorIdentity() {
 }
 
 export function SketchForgeEditor({
+  initialAssets = [],
   initialShapes = [],
   initialHistory,
   initialHistoryIndex,
   initialSnap,
   initialWorkspace,
+  initialPlacementElevation = 0,
   onHome,
+  onOpenSkfProjectFile,
+  onSaveSharedProject,
   onProjectShapesChange,
   onProjectSnapshot,
   onProjectWorkspaceChange,
   projectId,
   projectName = "SketchForge design",
+  projectCreatedAt = Date.now(),
+  projectModifiedAt = Date.now(),
   projectRevision = 0,
+  sharedProjectsEnabled = false,
 }: {
+  initialAssets?: ProjectAsset[];
   initialShapes?: WorkplaneShape[];
   initialHistory?: EditorHistoryEntry[];
   initialHistoryIndex?: number;
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
+  initialPlacementElevation?: number;
   onHome?: () => void;
+  onOpenSkfProjectFile?: (file: File) => Promise<{ ok: boolean; message: string } | void> | { ok: boolean; message: string } | void;
+  onSaveSharedProject?: (request: { exportName: string; bytes: Uint8Array }) => Promise<string>;
   onProjectShapesChange?: (snapshot: {
     projectId: string;
     shapes: WorkplaneShape[];
     history: EditorHistoryEntry[];
     historyIndex: number;
+    assets: ProjectAsset[];
   }) => void;
   onProjectSnapshot?: (snapshot: { image: string; projectId: string; shapes: number }) => void;
-  onProjectWorkspaceChange?: (snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
+  onProjectWorkspaceChange?: (snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize; placementElevation?: number }) => void;
   projectId?: string | null;
   projectName?: string;
+  projectCreatedAt?: number;
+  projectModifiedAt?: number;
   projectRevision?: number;
+  sharedProjectsEnabled?: boolean;
 } = {}) {
   const initialSceneRef = useRef<WorkplaneShape[] | null>(null);
   if (initialSceneRef.current === null) {
@@ -5090,17 +5261,20 @@ export function SketchForgeEditor({
     initialHistoryStateRef.current = hydrateEditorHistoryState(initialSceneRef.current, initialHistory, initialHistoryIndex);
   }
   const [shapes, setShapes] = useState<WorkplaneShape[]>(() => initialSceneRef.current as WorkplaneShape[]);
+  const [projectAssets, setProjectAssets] = useState<ProjectAsset[]>(() => dedupeProjectAssets(initialAssets));
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [clipboard, setClipboard] = useState<WorkplaneShape[]>([]);
   const [systemClipboardSupported, setSystemClipboardSupported] = useState(false);
   const [history, setHistory] = useState<EditorHistoryEntry[]>(() => (initialHistoryStateRef.current as EditorHistoryState).entries);
   const [historyIndex, setHistoryIndex] = useState(() => (initialHistoryStateRef.current as EditorHistoryState).index);
-  const [placementElevation, setPlacementElevation] = useState(0);
+  const [placementElevation, setPlacementElevation] = useState(() => Number.isFinite(initialPlacementElevation) ? initialPlacementElevation : 0);
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkplaneWorkspaceSettings>(() => normalizeWorkspaceSettings(initialWorkspace));
+  const [snapGrid, setSnapGrid] = useState<GridSize>(() => normalizeSnapGrid(initialSnap));
   const [workplaneMode, setWorkplaneMode] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [topPanel, setTopPanel] = useState<TopPanel>(null);
   const [stepExporting, setStepExporting] = useState(false);
+  const [skfExporting, setSkfExporting] = useState(false);
   const [alignMode, setAlignMode] = useState(false);
   const [alignAnchorId, setAlignAnchorId] = useState<string | null>(null);
   const [alignPreview, setAlignPreview] = useState<{ axis: AlignAxis; target: AlignTarget } | null>(null);
@@ -5109,6 +5283,7 @@ export function SketchForgeEditor({
   const [activeMode, setActiveMode] = useState("3D Design");
   const [notice, setNotice] = useState("Ready");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectFileInputRef = useRef<HTMLInputElement | null>(null);
   const sketchImageInputRef = useRef<HTMLInputElement | null>(null);
   const booleanAutomationRunRef = useRef<string | null>(null);
   const projectHydratingRef = useRef(false);
@@ -5150,6 +5325,7 @@ export function SketchForgeEditor({
   const lastProjectIdRef = useRef<string | null>(null);
   const projectSnapshotRunRef = useRef(0);
   const shapesRef = useRef(shapes);
+  const projectAssetsRef = useRef(projectAssets);
   const selectedIdsRef = useRef(selectedIds);
   const workspaceSettingsRef = useRef(workspaceSettings);
   const noticeRef = useRef(notice);
@@ -5173,6 +5349,10 @@ export function SketchForgeEditor({
   const [sketchMeasureStart, setSketchMeasureStart] = useState<SketchPoint | null>(null);
   const [sketchMeasurement, setSketchMeasurement] = useState<SketchMeasurement>(null);
   const [sketchCircleDraft, setSketchCircleDraft] = useState<SketchCircleDraft | null>(null);
+  const [sketchRectDraft, setSketchRectDraft] = useState<SketchRectDraft | null>(null);
+  const [sketchPolygonDraft, setSketchPolygonDraft] = useState<SketchPolygonDraft | null>(null);
+  const [sketchPolygonSides, setSketchPolygonSides] = useState(6);
+  const [sketchTextDraft, setSketchTextDraft] = useState<SketchTextDraft | null>(null);
   const [editingSketchShapeId, setEditingSketchShapeId] = useState<string | null>(null);
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
@@ -5419,6 +5599,10 @@ export function SketchForgeEditor({
   }, [shapes]);
 
   useEffect(() => {
+    projectAssetsRef.current = projectAssets;
+  }, [projectAssets]);
+
+  useEffect(() => {
     selectedIdsRef.current = selectedIds;
     const currentHistory = historyRef.current;
     const currentIndex = Math.min(historyIndexRef.current, Math.max(0, currentHistory.length - 1));
@@ -5465,6 +5649,10 @@ export function SketchForgeEditor({
   useEffect(() => {
     setWorkspaceSettings(normalizeWorkspaceSettings(initialWorkspace));
   }, [initialWorkspace]);
+
+  useEffect(() => {
+    setSnapGrid(normalizeSnapGrid(initialSnap));
+  }, [initialSnap]);
 
   const selectedShapes = useMemo(() => shapes.filter((shape) => selectedIds.includes(shape.id)), [selectedIds, shapes]);
   const selectedShape = selectedShapes.at(-1) ?? null;
@@ -5604,6 +5792,7 @@ export function SketchForgeEditor({
           shapes: canonicalNext,
           history: historyRef.current,
           historyIndex: historyIndexRef.current,
+          assets: projectAssetsRef.current,
         });
         projectSyncTimerRef.current = null;
       }, 120);
@@ -5684,13 +5873,24 @@ export function SketchForgeEditor({
   const updateProjectWorkspaceSettings = useCallback(
     (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
       setWorkspaceSettings(settings.workspace);
+      setSnapGrid(settings.snap);
       if (!projectId || !onProjectWorkspaceChange) {
         return;
       }
-      onProjectWorkspaceChange({ projectId, ...settings });
+      onProjectWorkspaceChange({ projectId, ...settings, placementElevation });
     },
-    [onProjectWorkspaceChange, projectId],
+    [onProjectWorkspaceChange, placementElevation, projectId],
   );
+
+  useEffect(() => {
+    if (!projectId || !onProjectWorkspaceChange) return;
+    onProjectWorkspaceChange({
+      projectId,
+      workspace: workspaceSettingsRef.current,
+      snap: snapGrid,
+      placementElevation,
+    });
+  }, [onProjectWorkspaceChange, placementElevation, projectId, snapGrid]);
 
   const commitShapes = useCallback(
     (next: WorkplaneShape[], nextSelection: string | string[] | null = selectedIds, message?: string) => {
@@ -5749,7 +5949,7 @@ export function SketchForgeEditor({
 
   const commitSketchProfile = useCallback(
     (next: SketchProfile, message?: string) => {
-      const snapshot = cloneSketchProfile(next);
+      const snapshot = cloneSketchProfile(solveSketchProfile(next).profile);
       const current = sketchHistoryRef.current;
       const currentIndex = Math.min(sketchHistoryIndexRef.current, Math.max(0, current.length - 1));
       const trimmed = current.slice(0, currentIndex + 1);
@@ -5769,7 +5969,7 @@ export function SketchForgeEditor({
   );
 
   const beginSketch = useCallback((profile?: SketchProfile, editingId: string | null = null) => {
-    const initial = cloneSketchProfile(profile ?? emptySketchProfile());
+    const initial = cloneSketchProfile(solveSketchProfile(profile ?? emptySketchProfile()).profile);
     setToolbarMode("sketch");
     setSketchActive(true);
     setSketchTool(profile?.segments.length ? "select" : "line");
@@ -5784,6 +5984,9 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setEditingSketchShapeId(editingId);
     setNotice(editingId ? "Editing sketch profile" : "Sketch started: place the first point");
   }, []);
@@ -5803,6 +6006,9 @@ export function SketchForgeEditor({
     setSketchMeasureStart(null);
     setSketchMeasurement(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setEditingSketchShapeId(null);
     setNotice("Sketch cancelled");
   }, []);
@@ -5820,6 +6026,9 @@ export function SketchForgeEditor({
     setSketchProfile(cloneSketchProfile(currentHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     setNotice("Sketch undo");
   }, []);
@@ -5837,6 +6046,9 @@ export function SketchForgeEditor({
     setSketchProfile(cloneSketchProfile(currentHistory[nextIndex] ?? emptySketchProfile()));
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     setNotice("Sketch redo");
   }, []);
@@ -5845,6 +6057,9 @@ export function SketchForgeEditor({
     setSketchTool(tool);
     setSketchActivePointId(null);
     setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
     setSketchSelection(null);
     if (tool !== "measure") setSketchMeasureStart(null);
     const messages: Record<SketchTool, string> = {
@@ -5853,6 +6068,12 @@ export function SketchForgeEditor({
       smooth: "Smooth curve: click points to build a flowing path",
       "circle-center": "Center circle: choose the center, then a radius point",
       "circle-diameter": "Two-point circle: choose opposite points on the diameter",
+      "rect-corner": "Rectangle: click one corner, then the opposite corner",
+      "rect-center": "Center rectangle: click the center, then a corner",
+      "poly-inscribed": "Inscribed polygon: click center, then a vertex",
+      "poly-circumscribed": "Circumscribed polygon: click center, then an edge midpoint",
+      "poly-edge": "Edge polygon: click two adjacent vertices",
+      text: "Text: click to place a text annotation on the sketch",
       select: "Select: edit sketch geometry or place and scale reference images",
       refine: "Refine: click a segment to add a point, or a point to remove it",
       erase: "Erase: click a point or segment to remove it",
@@ -5952,6 +6173,78 @@ export function SketchForgeEditor({
         });
         return;
       }
+      if (sketchTool === "rect-corner" || sketchTool === "rect-center") {
+        if (!sketchRectDraft || sketchRectDraft.tool !== sketchTool) {
+          setSketchRectDraft({ tool: sketchTool, first: position });
+          setSketchSelection(null);
+          setNotice(sketchTool === "rect-corner" ? "Choose the opposite corner" : "Choose a corner point");
+          return;
+        }
+        const bounds = rectFromPoints(
+          sketchTool === "rect-corner" ? "corner" : "center",
+          sketchRectDraft.first,
+          position,
+        );
+        if (bounds.width < 0.0001 || bounds.height < 0.0001) {
+          setNotice("Rectangle must have non-zero width and height");
+          return;
+        }
+        const rect = rectangleSketchGeometry(bounds);
+        const next: SketchProfile = {
+          ...sketchProfile,
+          points: [...sketchProfile.points, ...rect.points],
+          segments: [...sketchProfile.segments, ...rect.segments],
+          constraints: [
+            ...(sketchProfile.constraints ?? []),
+            ...rect.segments.map((segment, index) => ({
+              id: createLocalId(index % 2 === 0 ? "sketch-horizontal" : "sketch-vertical"),
+              kind: index % 2 === 0 ? "horizontal" as const : "vertical" as const,
+              segmentId: segment.id,
+            })),
+          ],
+        };
+        commitSketchProfile(next, "Rectangle added");
+        setSketchRectDraft(null);
+        setSketchSelection({
+          kind: "multiple",
+          pointIds: rect.points.map((point) => point.id),
+          segmentIds: rect.segments.map((segment) => segment.id),
+        });
+        return;
+      }
+      if (sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge") {
+        if (!sketchPolygonDraft || sketchPolygonDraft.tool !== sketchTool) {
+          setSketchPolygonDraft({ tool: sketchTool, first: position, sides: sketchPolygonSides });
+          setSketchSelection(null);
+          setNotice(sketchTool === "poly-edge" ? "Choose the second vertex" : "Choose a defining point");
+          return;
+        }
+        const mode = sketchTool === "poly-inscribed" ? "inscribed" : sketchTool === "poly-circumscribed" ? "circumscribed" : "edge";
+        const { center, circumR, startAngle } = polygonFromPoints(mode, sketchPolygonDraft.sides, sketchPolygonDraft.first, position);
+        if (circumR < 0.0001) {
+          setNotice("Polygon radius must be greater than zero");
+          return;
+        }
+        const polygon = polygonSketchGeometry(center, circumR, startAngle, sketchPolygonDraft.sides);
+        const next: SketchProfile = {
+          ...sketchProfile,
+          points: [...sketchProfile.points, ...polygon.points],
+          segments: [...sketchProfile.segments, ...polygon.segments],
+        };
+        commitSketchProfile(next, `${sketchPolygonDraft.sides}-sided polygon added`);
+        setSketchPolygonDraft(null);
+        setSketchSelection({
+          kind: "multiple",
+          pointIds: polygon.points.map((point) => point.id),
+          segmentIds: polygon.segments.map((segment) => segment.id),
+        });
+        return;
+      }
+      if (sketchTool === "text") {
+        setSketchTextDraft({ tool: "text", position });
+        setNotice("Type text and press Enter to confirm");
+        return;
+      }
       if (!["line", "bezier", "smooth"].includes(sketchTool)) return;
       const curveKind = sketchTool as NonNullable<SketchSegment["kind"]>;
       const existing = sketchProfile.points.find((point) => Math.hypot(point.x - position.x, point.z - position.z) < 0.0001);
@@ -5974,7 +6267,7 @@ export function SketchForgeEditor({
       setSketchActivePointId(point.id);
       setSketchSelection({ kind: "point", id: point.id });
     },
-    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchCircleDraft, sketchProfile, sketchTool],
+    [commitSketchProfile, connectSketchPoint, measureSketchPoint, sketchActivePointId, sketchCircleDraft, sketchPolygonDraft, sketchPolygonSides, sketchProfile, sketchRectDraft, sketchTool],
   );
 
   const pressSketchPoint = useCallback(
@@ -6019,11 +6312,11 @@ export function SketchForgeEditor({
           });
         }
       }
-      const next = {
+      const next = pruneSketchParameters({
         ...sketchProfile,
         points: sketchProfile.points.filter((point) => point.id !== id),
         segments: remainingSegments,
-      };
+      });
       commitSketchProfile(next.segments.some((segment) => segment.kind === "smooth") ? withSmoothSketchHandles(next) : next, "Sketch point removed");
       if (sketchActivePointId === id) setSketchActivePointId(null);
       setSketchSelection(null);
@@ -6033,7 +6326,7 @@ export function SketchForgeEditor({
 
   const deleteSketchSegment = useCallback(
     (id: string) => {
-      commitSketchProfile({ ...sketchProfile, segments: sketchProfile.segments.filter((segment) => segment.id !== id) }, "Sketch line removed");
+      commitSketchProfile(pruneSketchParameters({ ...sketchProfile, segments: sketchProfile.segments.filter((segment) => segment.id !== id) }), "Sketch line removed");
       setSketchActivePointId(null);
       setSketchSelection(null);
     },
@@ -6099,36 +6392,57 @@ export function SketchForgeEditor({
     if (sketchSelection.kind === "point") deleteSketchPoint(sketchSelection.id);
     else if (sketchSelection.kind === "segment") deleteSketchSegment(sketchSelection.id);
     else if (sketchSelection.kind === "image") deleteSketchImage(sketchSelection.id);
-    else {
+    else if (sketchSelection.kind === "text") {
+      commitSketchProfile({
+        ...sketchProfile,
+        texts: (sketchProfile.texts ?? []).filter((t) => t.id !== sketchSelection.id),
+      }, "Selected text removed");
+      setSketchActivePointId(null);
+      setSketchSelection(null);
+    } else {
       const pointIds = new Set(sketchSelection.pointIds);
       const segmentIds = new Set(sketchSelection.segmentIds);
       const imageIds = new Set(sketchSelection.imageIds ?? []);
-      commitSketchProfile({
+      const textIds = new Set(sketchSelection.textIds ?? []);
+      commitSketchProfile(pruneSketchParameters({
         ...sketchProfile,
         points: sketchProfile.points.filter((point) => !pointIds.has(point.id)),
         segments: sketchProfile.segments.filter((segment) => !segmentIds.has(segment.id) && !pointIds.has(segment.startId) && !pointIds.has(segment.endId)),
         images: (sketchProfile.images ?? []).filter((image) => !imageIds.has(image.id)),
-      }, "Selected sketch geometry removed");
+        texts: (sketchProfile.texts ?? []).filter((text) => !textIds.has(text.id)),
+      }), "Selected sketch geometry removed");
       setSketchActivePointId(null);
       setSketchSelection(null);
     }
   }, [commitSketchProfile, deleteSketchImage, deleteSketchPoint, deleteSketchSegment, sketchProfile, sketchSelection]);
 
   const moveSketchPoint = useCallback((id: string, position: { x: number; z: number }) => {
-    const current = sketchProfile.points.find((point) => point.id === id);
-    if (!current) return;
-    const deltaX = position.x - current.x;
-    const deltaZ = position.z - current.z;
-    const next = {
-      ...sketchProfile,
-      points: sketchProfile.points.map((point) => point.id === id ? {
-        ...point,
-        ...position,
-        handleIn: point.handleIn ? { x: point.handleIn.x + deltaX, z: point.handleIn.z + deltaZ } : undefined,
-        handleOut: point.handleOut ? { x: point.handleOut.x + deltaX, z: point.handleOut.z + deltaZ } : undefined,
-      } : point),
-    };
-    commitSketchProfile(next, "Sketch point moved");
+    if ((sketchProfile.constraints ?? []).some((constraint) => constraint.kind === "fixed" && constraint.pointId === id)) {
+      setNotice("Fixed points cannot be moved");
+      return;
+    }
+    const result = moveConstrainedSketchPoint(sketchProfile, id, position);
+    commitSketchProfile(result.profile, result.conflicts.length ? "Point moved with constraint conflicts" : "Sketch point moved");
+  }, [commitSketchProfile, sketchProfile]);
+
+  const toggleSketchPointFixed = useCallback((id: string) => {
+    const fixed = (sketchProfile.constraints ?? []).some((constraint) => constraint.kind === "fixed" && constraint.pointId === id);
+    const result = setSketchPointFixed(sketchProfile, id, !fixed, createLocalId);
+    commitSketchProfile(result.profile, fixed ? "Point released" : "Point fixed");
+    setSketchSelection({ kind: "point", id });
+  }, [commitSketchProfile, sketchProfile]);
+
+  const toggleSketchSegmentConstraint = useCallback((id: string, kind: "horizontal" | "vertical") => {
+    const enabled = !(sketchProfile.constraints ?? []).some((constraint) => constraint.kind === kind && constraint.segmentId === id);
+    const result = setSketchSegmentConstraint(sketchProfile, id, kind, enabled, createLocalId);
+    commitSketchProfile(result.profile, `${kind === "horizontal" ? "Horizontal" : "Vertical"} constraint ${enabled ? "added" : "removed"}`);
+    setSketchSelection({ kind: "segment", id });
+  }, [commitSketchProfile, sketchProfile]);
+
+  const updateSketchSegmentLength = useCallback((id: string, value: number | null) => {
+    const result = setSketchSegmentLength(sketchProfile, id, value, createLocalId);
+    commitSketchProfile(result.profile, value === null ? "Driving length removed" : result.conflicts.length ? "Length updated with constraint conflicts" : "Driving length updated");
+    setSketchSelection({ kind: "segment", id });
   }, [commitSketchProfile, sketchProfile]);
 
   const moveSketchHandle = useCallback((id: string, handle: "in" | "out", position: { x: number; z: number }) => {
@@ -6167,14 +6481,14 @@ export function SketchForgeEditor({
     const segment = sketchProfile.segments.find((entry) => entry.id === segmentId);
     if (!segment) return;
     const point: SketchPoint = { id: createLocalId("sketch-point"), ...position, mode: segment.kind === "line" ? "corner" : "smooth" };
-    let next: SketchProfile = {
+    let next: SketchProfile = pruneSketchParameters({
       ...sketchProfile,
       points: [...sketchProfile.points, point],
       segments: sketchProfile.segments.flatMap((entry) => entry.id === segmentId ? [
         { ...entry, id: createLocalId("sketch-segment"), endId: point.id },
         { ...entry, id: createLocalId("sketch-segment"), startId: point.id },
       ] : [entry]),
-    };
+    });
     if (segment.kind === "smooth") next = withSmoothSketchHandles(next);
     commitSketchProfile(next, "Point added to path");
     setSketchSelection({ kind: "point", id: point.id });
@@ -6185,17 +6499,32 @@ export function SketchForgeEditor({
     const existing = editingSketchShapeId ? shapes.find((shape) => shape.id === editingSketchShapeId) ?? null : null;
     const height = existing?.height ?? 10;
     setNotice("Building exact sketch geometry…");
+    let extruded: WorkplaneShape | null = null;
+    let exact = true;
     try {
-      const extruded = await cadShapeFromSketchProfile(sketchProfile, height, existing);
-      const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
-      commitShapes(nextShapes, extruded.id, existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height");
-      setSketchActive(false);
-      setSketchCircleDraft(null);
-      setEditingSketchShapeId(null);
-      setToolbarMode("geometry");
+      extruded = await cadShapeFromSketchProfile(sketchProfile, height, existing);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "OpenCascade could not build this sketch");
+      exact = false;
+      try {
+        extruded = await shapeFromSketchProfile(sketchProfile, height, existing);
+      } catch (fallbackError) {
+        setNotice(fallbackError instanceof Error ? fallbackError.message : error instanceof Error ? error.message : "The sketch profile cannot be converted to 3D");
+        return;
+      }
     }
+    if (!extruded) {
+      setNotice("Close at least one profile before finishing the sketch");
+      return;
+    }
+    const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
+    commitShapes(nextShapes, extruded.id, exact ? existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height" : existing ? "Sketch updated" : "Sketch created at 10 mm height");
+    setSketchActive(false);
+    setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
+    setEditingSketchShapeId(null);
+    setToolbarMode("geometry");
   }, [commitShapes, editingSketchShapeId, shapes, sketchProfile]);
 
   useEffect(() => {
@@ -6213,6 +6542,10 @@ export function SketchForgeEditor({
       lastProjectIdRef.current = projectId;
       lastProjectShapesSyncRef.current = "";
       lastProjectShapesEchoRef.current = null;
+      const nextAssets = dedupeProjectAssets(initialAssets);
+      projectAssetsRef.current = nextAssets;
+      setProjectAssets(nextAssets);
+      setPlacementElevation(Number.isFinite(initialPlacementElevation) ? initialPlacementElevation : 0);
     }
     const incoming = initialShapes.map(canonicalizeShape);
     const incomingSerialized = projectShapesFingerprint(incoming);
@@ -6240,7 +6573,7 @@ export function SketchForgeEditor({
     setHistory(hydratedHistory.entries);
     setHistoryIndex(hydratedHistory.index);
     setNotice(incoming.length ? "Project synced" : "Ready");
-  }, [initialHistory, initialHistoryIndex, initialShapes, projectId, projectInteractionActive, projectRevision]);
+  }, [initialAssets, initialHistory, initialHistoryIndex, initialPlacementElevation, initialShapes, projectId, projectInteractionActive, projectRevision]);
 
   useEffect(() => {
     if (!projectId || !onProjectShapesChange) {
@@ -7073,7 +7406,8 @@ export function SketchForgeEditor({
       return;
     }
     const selected = new Set(selectedIds);
-    commitShapes([...shapesRef.current.filter((shape) => !selected.has(shape.id)), group], group.id, `Grouped ${selectedShapes.length} shapes`);
+    const editableGroup = canonicalizeShape({ ...group, groupOperation: "group" });
+    commitShapes([...shapesRef.current.filter((shape) => !selected.has(shape.id)), editableGroup], editableGroup.id, `Grouped ${selectedShapes.length} shapes`);
   }, [commitShapes, selectedIds, selectedShapes]);
 
   const intersectSelected = useCallback(async () => {
@@ -7104,7 +7438,7 @@ export function SketchForgeEditor({
       return;
     }
 
-    const intersection = result.group;
+    const intersection = result.group ? canonicalizeShape({ ...result.group, groupOperation: "intersection" }) : null;
     if (!intersection) {
       return;
     }
@@ -7207,7 +7541,7 @@ export function SketchForgeEditor({
         let shape: WorkplaneShape;
         if (kind === "sketch") {
           const profile = defaultMcpSketchProfile(width, depth);
-          const extruded = shapeFromSketchProfile(profile, height);
+          const extruded = await shapeFromSketchProfile(profile, height);
           if (!extruded) throw new Error("Could not create the sketch profile");
           shape = canonicalizeShape({
             ...extruded,
@@ -7381,8 +7715,9 @@ export function SketchForgeEditor({
           }
           throw new Error(result.failureNotice);
         }
-        commitShapes([...currentShapes().filter((shape) => !ids.has(shape.id)), result.group], result.group.id, `MCP grouped ${groupable.length} objects`);
-        return { object: mcpShapeSummary(result.group) };
+        const editableGroup = canonicalizeShape({ ...result.group, groupOperation: "group" });
+        commitShapes([...currentShapes().filter((shape) => !ids.has(shape.id)), editableGroup], editableGroup.id, `MCP grouped ${groupable.length} objects`);
+        return { object: mcpShapeSummary(editableGroup) };
       }
 
       if (command.action === "ungroup_objects") {
@@ -7423,8 +7758,9 @@ export function SketchForgeEditor({
         if (!result.group) {
           throw new Error(result.failureNotice);
         }
-        commitShapes([...remainingShapes, result.group], result.group.id, "MCP boolean cut complete");
-        return { object: mcpShapeSummary(result.group) };
+        const editableGroup = canonicalizeShape({ ...result.group, groupOperation: "group" });
+        commitShapes([...remainingShapes, editableGroup], editableGroup.id, "MCP boolean cut complete");
+        return { object: mcpShapeSummary(editableGroup) };
       }
 
       if (command.action === "separate_parts") {
@@ -7733,7 +8069,7 @@ export function SketchForgeEditor({
     void run();
   }, [commitShapes]);
 
-  const exportDesign = useCallback((format: ExportFormat) => {
+  const exportDesign = useCallback((format: DirectExportFormat, exportName: string) => {
     const sourceShapes = hasSelection ? selectedShapes : shapes;
     const exportable = sourceShapes.filter((shape) => !shape.hole);
     if (exportable.length === 0) {
@@ -7745,7 +8081,6 @@ export function SketchForgeEditor({
       setNotice(`${invalidSvg}. Re-import the source SVG after fixing its contours`);
       return;
     }
-    const meshes = exportable.map(meshForShape);
     const selectedNotice = `Exported ${exportable.length} selected shape${exportable.length === 1 ? "" : "s"}`;
     const finishNotice = (label: string, result: DownloadResult) => {
       if (result.mode === "folder") {
@@ -7757,18 +8092,27 @@ export function SketchForgeEditor({
     const failNotice = (label: string, error: unknown) => {
       setNotice(error instanceof Error ? error.message : `Could not export ${label}`);
     };
+    if (format === "svg") {
+      setNotice("Building SVG top-view projection…");
+      void toSvg(exportable, exportName.trim() || projectName)
+        .then((content) => downloadTextFile(projectExportFileName(exportName, "svg"), content, "image/svg+xml;charset=utf-8"))
+        .then((result) => finishNotice("SVG", result))
+        .catch((error: unknown) => failNotice("SVG", error));
+      return;
+    }
+    const meshes = exportable.map(meshForShape);
     if (format === "stl") {
-      void downloadTextFile(projectExportFileName(projectName, "stl"), toStl(meshes), "model/stl")
+      void downloadTextFile(projectExportFileName(exportName, "stl"), toStl(meshes), "model/stl")
         .then((result) => finishNotice("STL", result))
         .catch((error: unknown) => failNotice("STL", error));
       return;
     }
-    void downloadTextFile(projectExportFileName(projectName, "obj"), toObj(meshes), "text/plain")
+    void downloadTextFile(projectExportFileName(exportName, "obj"), toObj(meshes), "text/plain")
       .then((result) => finishNotice("OBJ", result))
       .catch((error: unknown) => failNotice("OBJ", error));
   }, [hasSelection, projectName, selectedShapes, shapes]);
 
-  const exportStepDesign = useCallback(async () => {
+  const exportStepDesign = useCallback(async (exportName: string) => {
     if (stepExporting) {
       return;
     }
@@ -7783,7 +8127,7 @@ export function SketchForgeEditor({
       const { exportShapesToStep } = await import("@/lib/stepExport");
       const { blob, exportedCount, skipped } = await exportShapesToStep(sourceShapes);
       const text = await blob.text();
-      const result = await downloadTextFile(projectExportFileName(projectName, "step"), text, "application/step");
+      const result = await downloadTextFile(projectExportFileName(exportName, "step"), text, "application/step");
       const skipNote = skipped.length > 0 ? `; skipped ${skipped.length} non-primitive shape${skipped.length === 1 ? "" : "s"}` : "";
       if (result.mode === "folder") {
         setNotice(`Saved STEP (${exportedCount} bod${exportedCount === 1 ? "y" : "ies"}) to ${result.path}${skipNote}`);
@@ -7796,6 +8140,47 @@ export function SketchForgeEditor({
       setStepExporting(false);
     }
   }, [hasSelection, projectName, selectedShapes, shapes, stepExporting]);
+
+  const exportSkfDesign = useCallback(async (exportName: string, historyLimit: SkfHistoryLimit, target: SkfExportTarget = "download") => {
+    if (skfExporting) return;
+    if (target === "shared" && !onSaveSharedProject) {
+      setNotice("Shared project storage is not available in this deployment");
+      return;
+    }
+    if (projectInteractionActiveRef.current) {
+      setNotice("Finish the current drag or transform before saving the project file");
+      return;
+    }
+    setSkfExporting(true);
+    setNotice(target === "shared" ? "Packaging project for Docker shared storage…" : "Packaging editable project, history, and deduplicated assets…");
+    try {
+      const exportedHistory = editorHistoryForExport(historyRef.current, historyIndexRef.current, historyLimit);
+      const bytes = await exportSkfProject({
+        projectId: projectInfoRef.current.projectId,
+        projectName: exportName.trim() || projectName,
+        createdAt: projectCreatedAt,
+        modifiedAt: projectModifiedAt,
+        shapes: shapesRef.current,
+        history: exportedHistory.entries,
+        historyIndex: exportedHistory.index,
+        assets: projectAssetsRef.current,
+        workspace: workspaceSettingsRef.current,
+        snapGrid,
+        placementElevation,
+      });
+      if (target === "shared" && onSaveSharedProject) {
+        setNotice(await onSaveSharedProject({ exportName: exportName.trim() || projectName, bytes }));
+      } else {
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        const result = await downloadBlobFile(projectExportFileName(exportName, "skf"), new Blob([buffer], { type: SKF_MEDIA_TYPE }));
+        setNotice(result.mode === "folder" ? `Saved editable SketchForge project to ${result.path}` : "Saved editable SketchForge project (.skf)");
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save SketchForge project");
+    } finally {
+      setSkfExporting(false);
+    }
+  }, [onSaveSharedProject, placementElevation, projectCreatedAt, projectModifiedAt, projectName, skfExporting, snapGrid]);
 
   const clearDesign = useCallback(() => {
     commitShapes([], [], "New empty design");
@@ -7848,45 +8233,107 @@ export function SketchForgeEditor({
     setMenuOpen(false);
   }, [commitShapes, shapes]);
 
-  const selectFile = useCallback(async (file: File) => {
-    const isStep = /\.(step|stp)$/i.test(file.name);
-    const isSvg = /\.svg$/i.test(file.name) || file.type === "image/svg+xml";
-    if (!isStep && !isSvg && !importExtensionSupported(file.name)) {
-      setNotice("Unsupported file type. Use STL, STEP, or SVG.");
+  const importFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const projectFiles = files.filter((file) => /\.skf$/i.test(file.name));
+    if (projectFiles.length) {
+      if (files.length !== 1) {
+        setNotice("Open one .skf project at a time; import STL, STEP, and SVG geometry separately");
+        return;
+      }
+      if (!onOpenSkfProjectFile) {
+        setNotice("Opening SketchForge project files is unavailable here");
+        return;
+      }
+      setNotice(`Validating ${projectFiles[0].name} before opening it as a new project`);
+      const result = await onOpenSkfProjectFile(projectFiles[0]);
+      if (result?.message) setNotice(result.message);
+      if (result?.ok !== false) setTopPanel(null);
+      return;
+    }
+    const sourceProjectId = projectInfoRef.current.projectId;
+    const importedShapes: WorkplaneShape[] = [];
+    const importedAssets: ProjectAsset[] = [];
+    const failures: Array<{ fileName: string; reason: string }> = [];
+
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      if (projectInfoRef.current.projectId !== sourceProjectId) {
+        setNotice(`Import of ${files.length} files cancelled because the project changed`);
+        return;
+      }
+
+      const sourceFormat = sourceFormatForFileName(file.name) ?? (file.type === "image/svg+xml" ? "svg" : null);
+      const isStep = sourceFormat === "step";
+      const isSvg = sourceFormat === "svg";
+      if (!sourceFormat || sourceFormat === "obj" || (!isStep && !isSvg && !importExtensionSupported(file.name))) {
+        failures.push({ fileName: file.name, reason: "Unsupported file type" });
+        continue;
+      }
+
+      setNotice(`Importing ${index + 1} of ${files.length}: ${file.name}${isStep ? "… first STEP import loads the OpenCascade kernel (~22 MB)" : ""}`);
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        let nextShape: WorkplaneShape;
+        if (isStep) {
+          const { importedShapeFromStep } = await import("@/lib/stepImport");
+          nextShape = await importedShapeFromStep(file.name, buffer);
+        } else if (isSvg) {
+          nextShape = importedShapeFromSvg(file.name, new TextDecoder().decode(bytes));
+        } else {
+          nextShape = importedShapeFromStl(file.name, buffer);
+        }
+        const asset = await projectAssetFromBytes(file.name, sourceFormat, bytes, file.type);
+        importedShapes.push(attachProjectAsset(nextShape, asset.id));
+        importedAssets.push(asset);
+      } catch (error) {
+        failures.push({
+          fileName: file.name,
+          reason: error instanceof Error ? error.message : "Could not read file",
+        });
+      }
+    }
+
+    if (projectInfoRef.current.projectId !== sourceProjectId) {
+      setNotice(`Import of ${files.length} files cancelled because the project changed`);
       return;
     }
 
-    const sourceProjectId = projectInfoRef.current.projectId;
-    try {
-      let nextShape: WorkplaneShape;
-      if (isStep) {
-        setNotice("Reading STEP… first import loads the OpenCascade kernel (~22 MB), one time per session");
-        const { importedShapeFromStep } = await import("@/lib/stepImport");
-        nextShape = await importedShapeFromStep(file.name, await file.arrayBuffer());
-      } else if (isSvg) {
-        nextShape = importedShapeFromSvg(file.name, await file.text());
-      } else {
-        nextShape = importedShapeFromStl(file.name, await file.arrayBuffer());
-      }
-      if (projectInfoRef.current.projectId !== sourceProjectId) {
-        setNotice(`Import of ${file.name} cancelled because the project changed`);
-        return;
-      }
-      commitShapes([...shapesRef.current, nextShape], nextShape.id, `Imported ${file.name}`);
-      setTopPanel(null);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : `Could not import ${file.name}`);
+    const failureDetails = failures
+      .slice(0, 3)
+      .map((failure) => `${failure.fileName}: ${failure.reason}`)
+      .join("; ");
+    const remainingFailureCount = Math.max(0, failures.length - 3);
+    const failureSummary = failures.length
+      ? ` Failed: ${failureDetails}${remainingFailureCount ? `; plus ${remainingFailureCount} more` : ""}`
+      : "";
+
+    if (!importedShapes.length) {
+      setNotice(files.length === 1 && failures[0] ? failures[0].reason : `Could not import any of the ${files.length} selected files.${failureSummary}`);
+      return;
     }
-  }, [commitShapes]);
+
+    const successSummary = importedShapes.length === 1 && files.length === 1
+      ? `Imported ${files[0].name}`
+      : `Imported ${importedShapes.length} of ${files.length} files`;
+    const nextAssets = dedupeProjectAssets([...projectAssetsRef.current, ...importedAssets]);
+    projectAssetsRef.current = nextAssets;
+    setProjectAssets(nextAssets);
+    commitShapes(
+      [...shapesRef.current, ...importedShapes],
+      importedShapes.map((shape) => shape.id),
+      `${successSummary}.${failureSummary}`.trim(),
+    );
+    setTopPanel(null);
+  }, [commitShapes, onOpenSkfProjectFile]);
 
   const selectFiles = useCallback(
     (files: FileList | File[]) => {
-      const file = Array.from(files)[0];
-      if (file) {
-        void selectFile(file);
-      }
+      const selectedFiles = Array.from(files);
+      if (selectedFiles.length) void importFiles(selectedFiles);
     },
-    [selectFile],
+    [importFiles],
   );
 
   const selectShape = useCallback((id: string | string[] | null, mode: "replace" | "toggle" = "replace") => {
@@ -7949,6 +8396,9 @@ export function SketchForgeEditor({
           event.preventDefault();
           setSketchActivePointId(null);
           setSketchCircleDraft(null);
+          setSketchRectDraft(null);
+          setSketchPolygonDraft(null);
+          setSketchTextDraft(null);
           setSketchSelection(null);
           setNotice("Current sketch chain cleared");
         } else if (event.key === "Delete" || event.key === "Backspace") {
@@ -8145,6 +8595,8 @@ export function SketchForgeEditor({
         mirrorMode={mirrorMode}
         sketchActive={sketchActive}
         sketchTool={sketchTool}
+        sketchPolygonSides={sketchPolygonSides}
+        onSketchPolygonSidesChange={setSketchPolygonSides}
         sketchCanUndo={sketchHistoryIndex > 0}
         sketchCanRedo={sketchHistoryIndex < sketchHistory.length - 1}
         canEditSketch={selectedShapes.length === 1 && Boolean(selectedShape?.sketchProfile)}
@@ -8186,7 +8638,7 @@ export function SketchForgeEditor({
         onWorkplaneTool={activateWorkplaneTool}
         workplaneMode={workplaneMode}
         onTopPanel={(panel) => {
-          setTopPanel(panel);
+          setTopPanel((current) => (current === panel ? null : panel));
           setMenuOpen(false);
         }}
         onAddShape={(shape) => {
@@ -8206,6 +8658,9 @@ export function SketchForgeEditor({
             measurement={sketchMeasurement}
             pendingMeasurementStart={sketchMeasureStart}
             circleDraft={sketchCircleDraft}
+            rectDraft={sketchRectDraft}
+            polygonDraft={sketchPolygonDraft}
+            textDraft={sketchTextDraft}
             initialSnap={initialSnap}
             initialWorkspace={initialWorkspace}
             onPlanePoint={addSketchPlanePoint}
@@ -8214,16 +8669,21 @@ export function SketchForgeEditor({
               setSketchSelection({ kind: "segment", id });
               setSketchActivePointId(null);
             }}
-            onSelectMany={(pointIds, segmentIds, imageIds) => {
-              setSketchSelection(pointIds.length || segmentIds.length || imageIds.length ? { kind: "multiple", pointIds, segmentIds, imageIds } : null);
+            onSelectMany={(pointIds, segmentIds, imageIds, textIds) => {
+              setSketchSelection(pointIds.length || segmentIds.length || imageIds.length || textIds.length ? { kind: "multiple", pointIds, segmentIds, imageIds, textIds } : null);
               setSketchActivePointId(null);
-              const count = pointIds.length + segmentIds.length + imageIds.length;
+              const count = pointIds.length + segmentIds.length + imageIds.length + textIds.length;
               setNotice(count ? `Selected ${count} sketch item${count === 1 ? "" : "s"}` : "Sketch selection cleared");
             }}
             onSelectImage={(id) => {
               setSketchSelection({ kind: "image", id });
               setSketchActivePointId(null);
               setNotice("Sketch image selected");
+            }}
+            onSelectText={(id) => {
+              setSketchSelection({ kind: "text", id });
+              setSketchActivePointId(null);
+              setNotice("Sketch text selected");
             }}
             onUpdateImage={updateSketchImage}
             onDeleteImage={deleteSketchImage}
@@ -8233,7 +8693,32 @@ export function SketchForgeEditor({
             onMoveHandle={moveSketchHandle}
             onInsertPoint={insertSketchPoint}
             onSetPointMode={setSketchPointMode}
+            onTogglePointFixed={toggleSketchPointFixed}
+            onToggleSegmentConstraint={toggleSketchSegmentConstraint}
+            onSetSegmentLength={updateSketchSegmentLength}
             onClearMeasurement={clearSketchMeasurement}
+            onTextSubmit={(text) => {
+              if (!sketchTextDraft) return;
+              const font = booleanTextFonts.Sans ?? booleanTextFonts.Multilanguage;
+              const geometry = textSketchGeometry(text, font, 10, sketchTextDraft.position);
+              const next: SketchProfile = {
+                ...sketchProfile,
+                points: [...sketchProfile.points, ...geometry.points],
+                segments: [...sketchProfile.segments, ...geometry.segments],
+              };
+              commitSketchProfile(next, "Text geometry added to sketch");
+              setSketchTextDraft(null);
+              setSketchSelection({
+                kind: "multiple",
+                pointIds: geometry.points.map((p) => p.id),
+                segmentIds: geometry.segments.map((s) => s.id),
+              });
+              setNotice("Text geometry placed on sketch");
+            }}
+            onTextCancel={() => {
+              setSketchTextDraft(null);
+              setNotice("Text cancelled");
+            }}
           />
         ) : (
           <WorkplaneViewport
@@ -8331,14 +8816,19 @@ export function SketchForgeEditor({
           panel={topPanel}
           workspace={workspaceSettings}
           onWorkspaceChange={setWorkspaceSettings}
+          projectName={projectName}
           shapeCount={exportableShapeCount}
           scopeLabel={exportScopeLabel}
           onClose={() => setTopPanel(null)}
           onExport={exportDesign}
+          onExportSkf={exportSkfDesign}
           onExportStep={exportStepDesign}
+          sharedProjectsEnabled={sharedProjectsEnabled}
+          skfExporting={skfExporting}
           stepExporting={stepExporting}
           onImportFiles={selectFiles}
           onPickFile={() => fileInputRef.current?.click()}
+          onPickProjectFile={() => projectFileInputRef.current?.click()}
           onNotice={setNotice}
         />
       ) : null}
@@ -8354,9 +8844,21 @@ export function SketchForgeEditor({
         }}
       />
       <input
+        ref={projectFileInputRef}
+        className="hidden-file-input"
+        type="file"
+        accept=".skf"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          if (file) selectFiles([file]);
+          event.currentTarget.value = "";
+        }}
+      />
+      <input
         ref={fileInputRef}
         className="hidden-file-input"
         type="file"
+        multiple
         accept=".stl,.step,.stp,.svg,image/svg+xml"
         onChange={(event) => {
           if (event.currentTarget.files) {
@@ -8423,6 +8925,8 @@ function SecondaryToolbar({
   mirrorMode,
   sketchActive,
   sketchTool,
+  sketchPolygonSides,
+  onSketchPolygonSidesChange,
   sketchCanUndo,
   sketchCanRedo,
   canEditSketch,
@@ -8473,6 +8977,8 @@ function SecondaryToolbar({
   mirrorMode: boolean;
   sketchActive: boolean;
   sketchTool: SketchTool;
+  sketchPolygonSides: number;
+  onSketchPolygonSidesChange: (sides: number) => void;
   sketchCanUndo: boolean;
   sketchCanRedo: boolean;
   canEditSketch: boolean;
@@ -8723,8 +9229,30 @@ function SecondaryToolbar({
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "circle-diameter" ? "active" : ""}`} type="button" aria-label="Two Point Circle" title="Two Point Circle" onClick={() => onSketchTool("circle-diameter")}>
                       <Circle aria-hidden="true" />
                     </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "rect-corner" ? "active" : ""}`} type="button" aria-label="Corner Rectangle" title="Corner Rectangle" onClick={() => onSketchTool("rect-corner")}>
+                      <Square aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "rect-center" ? "active" : ""}`} type="button" aria-label="Center Rectangle" title="Center Rectangle" onClick={() => onSketchTool("rect-center")}>
+                      <Square aria-hidden="true" style={{ opacity: 0.6 }} />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge" ? "active" : ""}`} type="button" aria-label="Polygon" title="Polygon" onClick={() => onSketchTool("poly-inscribed")}>
+                      <Hexagon aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "text" ? "active" : ""}`} type="button" aria-label="Text" title="Text" onClick={() => onSketchTool("text")}>
+                      <Type aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
+                {sketchTool === "poly-inscribed" || sketchTool === "poly-circumscribed" || sketchTool === "poly-edge" ? (
+                  <div className="toolbar-section">
+                    <div className="toolbar-section-label">Sides</div>
+                    <div className="toolbar-section-tools" style={{ alignItems: "center", gap: 4 }}>
+                      <button type="button" className="toolbar-icon sketch-tool-icon" onClick={() => onSketchPolygonSidesChange(Math.max(3, sketchPolygonSides - 1))} title="Fewer sides">-</button>
+                      <span style={{ fontSize: 12, minWidth: 20, textAlign: "center" }}>{sketchPolygonSides}</span>
+                      <button type="button" className="toolbar-icon sketch-tool-icon" onClick={() => onSketchPolygonSidesChange(Math.min(24, sketchPolygonSides + 1))} title="More sides">+</button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="toolbar-section sketch-edit-section">
                   <div className="toolbar-section-label">Select</div>
                   <div className="toolbar-section-tools">
@@ -8829,29 +9357,44 @@ function TopActionPanel({
   panel,
   workspace,
   onWorkspaceChange,
+  projectName,
   shapeCount,
   scopeLabel,
   onClose,
   onExport,
+  onExportSkf,
   onExportStep,
+  sharedProjectsEnabled,
+  skfExporting,
   stepExporting,
   onImportFiles,
   onPickFile,
+  onPickProjectFile,
   onNotice,
 }: {
   panel: Exclude<TopPanel, null>;
+  projectName: string;
   shapeCount: number;
   scopeLabel: "selected" | "total";
   onClose: () => void;
-  onExport: (format: ExportFormat) => void;
-  onExportStep: () => void;
+  onExport: (format: DirectExportFormat, exportName: string) => void;
+  onExportSkf: (exportName: string, historyLimit: SkfHistoryLimit, target?: SkfExportTarget) => void;
+  onExportStep: (exportName: string) => void;
+  sharedProjectsEnabled: boolean;
+  skfExporting: boolean;
   stepExporting: boolean;
   onImportFiles: (files: FileList | File[]) => void;
   onPickFile: () => void;
+  onPickProjectFile: () => void;
   onNotice: (message: string) => void;
   workspace: WorkplaneWorkspaceSettings;
   onWorkspaceChange: (w: WorkplaneWorkspaceSettings) => void;
 }) {
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("stl");
+  const [exportName, setExportName] = useState(projectName);
+  const [skfHistoryLimit, setSkfHistoryLimit] = useState<SkfHistoryLimit>("unlimited");
+  const skfHistoryLimits: readonly SkfHistoryLimit[] = ["unlimited", 100, 50, 30];
+  const skfHistoryLimitIndex = skfHistoryLimits.indexOf(skfHistoryLimit);
   const title =
     panel === "profile"
       ? "Profile"
@@ -8864,16 +9407,64 @@ function TopActionPanel({
              : "Import";
   const customTheme = customThemeWithDefaults(workspace.customTheme);
 
+  const exportDetails: Record<ExportFormat, { label: string; description: string; note: string }> = {
+    stl: {
+      label: "STL",
+      description: "3D print mesh",
+      note: "Best for slicers and 3D printing. Geometry is exported as a triangulated mesh.",
+    },
+    obj: {
+      label: "OBJ",
+      description: "Universal 3D mesh",
+      note: "A broadly compatible mesh format for modeling, rendering, and interchange.",
+    },
+    step: {
+      label: "STEP",
+      description: "CAD / B-Rep",
+      note: "Keeps supported boxes, cylinders, spheres, and cones as precise CAD geometry.",
+    },
+    svg: {
+      label: "SVG",
+      description: "Top-view vector",
+      note: "Exports a clean top-view silhouette in millimeters, including holes and curved contours.",
+    },
+    skf: {
+      label: "SKF",
+      description: "Editable project",
+      note: "Preserves the editable project, undo/redo history, sketches, groups, CAD data, and imported sources.",
+    },
+  };
+  const selectedExport = exportDetails[exportFormat];
+  const runSelectedExport = () => {
+    if (exportFormat === "step") onExportStep(exportName);
+    else if (exportFormat === "skf") onExportSkf(exportName, skfHistoryLimit);
+    else onExport(exportFormat, exportName);
+  };
+
   return (
-    <div className="top-action-panel" role="dialog" aria-label={title}>
+    <div
+      className={`top-action-panel ${panel === "export" ? "export-action-panel" : panel === "import" ? "import-action-panel" : ""}`}
+      role="dialog"
+      aria-label={title}
+    >
       <header>
-        <strong>{title}</strong>
+        <div className="top-action-heading">
+          <strong>{title}</strong>
+        </div>
         <button aria-label={`Close ${title}`} onClick={onClose}>
           <X size={18} />
         </button>
       </header>
       {panel === "import" ? (
         <div className="top-action-body">
+          <button className="open-skf-project-button" type="button" onClick={onPickProjectFile}>
+            <span className="open-skf-project-icon"><FolderOpen size={18} /></span>
+            <span>
+              <strong>Open SketchForge Project</strong>
+              <small>Restore an editable .skf file as a new local project</small>
+            </span>
+          </button>
+          <div className="import-kind-divider"><span>or add geometry</span></div>
           <button
             className="import-drop-zone"
             onClick={onPickFile}
@@ -8895,21 +9486,110 @@ function TopActionPanel({
         </div>
       ) : null}
       {panel === "export" ? (
-        <div className="top-action-body">
-          <p>{shapeCount} {scopeLabel} solid shape{shapeCount === 1 ? "" : "s"} ready to export.</p>
-          <button onClick={() => onExport("stl")}>
-            <Download size={18} />
-            Download STL
-          </button>
-          <button onClick={() => onExport("obj")}>
-            <ToolbarExportIcon />
-            Download OBJ
-          </button>
-          <button onClick={onExportStep} disabled={stepExporting}>
-            <ToolbarExportIcon />
-            {stepExporting ? "Building STEP…" : "Download STEP (B-Rep)"}
-          </button>
-          <p className="export-step-note">STEP keeps boxes, cylinders, spheres and cones as exact CAD geometry (OpenCascade). Other shapes are skipped.</p>
+        <div className="export-dialog-body">
+          <section className="export-setting-section export-file-section">
+            <label htmlFor="export-file-name">File name</label>
+            <div className="export-file-input-wrap">
+              <input
+                id="export-file-name"
+                className="export-file-input"
+                value={exportName}
+                maxLength={120}
+                spellCheck={false}
+                onChange={(event) => setExportName(event.target.value)}
+                onFocus={(event) => event.currentTarget.select()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (shapeCount > 0 || exportFormat === "skf") && !stepExporting && !skfExporting) runSelectedExport();
+                }}
+              />
+              <span>.{exportFormat}</span>
+            </div>
+          </section>
+
+          <section className="export-setting-section">
+            <div className="export-section-heading">
+              <div>
+                <strong>Format</strong>
+              </div>
+              <span className="export-scope-badge">{exportFormat === "skf" ? "Full project" : `${shapeCount} ${scopeLabel}`}</span>
+            </div>
+            <div className="export-format-slider" data-format={exportFormat} role="radiogroup" aria-label="Export format">
+              {(["stl", "obj", "step", "svg", "skf"] as const).map((format) => (
+                <button
+                  key={format}
+                  type="button"
+                  role="radio"
+                  aria-checked={exportFormat === format}
+                  aria-label={`${exportDetails[format].label}: ${exportDetails[format].description}`}
+                  onClick={() => setExportFormat(format)}
+                >
+                  {exportDetails[format].label}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {exportFormat === "skf" ? (
+            <section className="export-setting-section skf-history-section">
+              <div className="export-section-heading">
+                <div>
+                  <strong>Saved action history</strong>
+                  <span>Choose how many recent undo actions travel with the project</span>
+                </div>
+              </div>
+              <div className="skf-history-range-control" data-limit={String(skfHistoryLimit)}>
+                <input
+                  className="skf-history-range"
+                  type="range"
+                  min={0}
+                  max={skfHistoryLimits.length - 1}
+                  step={1}
+                  value={skfHistoryLimitIndex}
+                  aria-label="Saved SKF action history"
+                  aria-valuetext={skfHistoryLimit === "unlimited" ? "Unlimited" : `${skfHistoryLimit} actions`}
+                  onChange={(event) => setSkfHistoryLimit(skfHistoryLimits[Number(event.currentTarget.value)] ?? "unlimited")}
+                />
+              </div>
+              <div className="skf-history-range-labels" aria-hidden="true">
+                {skfHistoryLimits.map((limit) => (
+                  <span key={limit} className={skfHistoryLimit === limit ? "active" : undefined}>
+                    {limit === "unlimited" ? "Unlimited" : limit}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          <div className="export-format-summary">
+            <div>
+              <strong>{selectedExport.label}</strong>
+              <span>{selectedExport.description}</span>
+            </div>
+            <p>{selectedExport.note}</p>
+          </div>
+
+          <footer className="export-dialog-footer">
+            <div>
+              {exportFormat === "skf" && sharedProjectsEnabled ? (
+                <button
+                  className="export-shared-button"
+                  type="button"
+                  onClick={() => onExportSkf(exportName, skfHistoryLimit, "shared")}
+                  disabled={skfExporting || stepExporting}
+                >
+                  <CloudUpload />
+                  <span>Save to shared</span>
+                </button>
+              ) : null}
+              <button className="export-primary-button" onClick={runSelectedExport} disabled={(shapeCount === 0 && exportFormat !== "skf") || stepExporting || skfExporting}>
+                <Download />
+                {exportFormat === "skf" ? (skfExporting ? "Saving project…" : "Save SketchForge Project") : null}
+                <span hidden={exportFormat === "skf"}>
+                {stepExporting && exportFormat === "step" ? "Building STEP…" : `Export ${selectedExport.label}`}
+                </span>
+              </button>
+            </div>
+          </footer>
         </div>
       ) : null}
       {panel === "tips" ? (

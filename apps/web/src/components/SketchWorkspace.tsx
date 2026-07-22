@@ -1,23 +1,40 @@
 "use client";
 
-import { ChevronUp, CornerDownRight, Home, Link, Link2Off, Minus, Plus, Split, Trash2, Waves } from "lucide-react";
+import { ChevronUp, CornerDownRight, Home, Link, Link2Off, LockKeyhole, LockKeyholeOpen, Minus, Plus, Split, Trash2, Waves } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { SnapGridControl } from "@/components/workplane/ShapeInspector";
 import { mirrorSign, resizedImportedMeshPositions } from "@/lib/workplaneShapes";
 import { circleFromPoints } from "@/lib/sketchCircles";
+import { moveConstrainedSketchPoint } from "@/lib/sketchConstraints";
+import { rectFromPoints } from "@/lib/sketchRectangles";
+import { polygonFromPoints } from "@/lib/sketchPolygons";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
-import type { GridSize, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { GridSize, SketchImage, SketchPoint, SketchProfile, SketchSegment, SketchText, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
-export type SketchTool = "line" | "bezier" | "smooth" | "circle-center" | "circle-diameter" | "select" | "refine" | "erase" | "measure";
+export type SketchTool = "line" | "bezier" | "smooth" | "circle-center" | "circle-diameter" | "rect-corner" | "rect-center" | "poly-inscribed" | "poly-circumscribed" | "poly-edge" | "text" | "select" | "refine" | "erase" | "measure";
 export type SketchCircleDraft = {
   tool: "circle-center" | "circle-diameter";
   first: { x: number; z: number };
+};
+export type SketchRectDraft = {
+  tool: "rect-corner" | "rect-center";
+  first: { x: number; z: number };
+};
+export type SketchPolygonDraft = {
+  tool: "poly-inscribed" | "poly-circumscribed" | "poly-edge";
+  first: { x: number; z: number };
+  sides: number;
+};
+export type SketchTextDraft = {
+  tool: "text";
+  position: { x: number; z: number };
 };
 export type SketchSelection =
   | { kind: "point"; id: string }
   | { kind: "segment"; id: string }
   | { kind: "image"; id: string }
-  | { kind: "multiple"; pointIds: string[]; segmentIds: string[]; imageIds?: string[] }
+  | { kind: "text"; id: string }
+  | { kind: "multiple"; pointIds: string[]; segmentIds: string[]; imageIds?: string[]; textIds?: string[] }
   | null;
 export type SketchMeasurement = { start: SketchPoint; end: SketchPoint } | null;
 
@@ -30,13 +47,17 @@ type SketchWorkspaceProps = {
   measurement: SketchMeasurement;
   pendingMeasurementStart: SketchPoint | null;
   circleDraft: SketchCircleDraft | null;
+  rectDraft: SketchRectDraft | null;
+  polygonDraft: SketchPolygonDraft | null;
+  textDraft: SketchTextDraft | null;
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
   onPointPress: (id: string) => void;
   onSelectSegment: (id: string) => void;
-  onSelectMany: (pointIds: string[], segmentIds: string[], imageIds: string[]) => void;
+  onSelectMany: (pointIds: string[], segmentIds: string[], imageIds: string[], textIds: string[]) => void;
   onSelectImage: (id: string) => void;
+  onSelectText: (id: string) => void;
   onUpdateImage: (id: string, patch: Partial<SketchImage>, message?: string) => void;
   onDeleteImage: (id: string) => void;
   onDeletePoint: (id: string) => void;
@@ -45,7 +66,12 @@ type SketchWorkspaceProps = {
   onMoveHandle: (id: string, handle: "in" | "out", point: { x: number; z: number }) => void;
   onInsertPoint: (segmentId: string, point: { x: number; z: number }) => void;
   onSetPointMode: (id: string, mode: "corner" | "smooth" | "split") => void;
+  onTogglePointFixed: (id: string) => void;
+  onToggleSegmentConstraint: (id: string, kind: "horizontal" | "vertical") => void;
+  onSetSegmentLength: (id: string, value: number | null) => void;
   onClearMeasurement: () => void;
+  onTextSubmit: (text: string) => void;
+  onTextCancel: () => void;
 };
 
 type PathStep = { segment: SketchSegment; from: SketchPoint; to: SketchPoint };
@@ -411,6 +437,9 @@ export function SketchWorkspace({
   measurement,
   pendingMeasurementStart,
   circleDraft,
+  rectDraft,
+  polygonDraft,
+  textDraft,
   initialSnap,
   initialWorkspace,
   onPlanePoint,
@@ -418,6 +447,7 @@ export function SketchWorkspace({
   onSelectSegment,
   onSelectMany,
   onSelectImage,
+  onSelectText,
   onUpdateImage,
   onDeleteImage,
   onDeletePoint,
@@ -426,7 +456,12 @@ export function SketchWorkspace({
   onMoveHandle,
   onInsertPoint,
   onSetPointMode,
+  onTogglePointFixed,
+  onToggleSegmentConstraint,
+  onSetSegmentLength,
   onClearMeasurement,
+  onTextSubmit,
+  onTextCancel,
 }: SketchWorkspaceProps) {
   const workspace = useMemo(() => normalizeWorkspaceSettings(initialWorkspace, DEFAULT_WORKPLANE_WORKSPACE), [initialWorkspace]);
   const [snap, setSnap] = useState<GridSize>(() => normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
@@ -437,6 +472,14 @@ export function SketchWorkspace({
   const [pointerAction, setPointerAction] = useState<PointerAction | null>(null);
   const [svgSize, setSvgSize] = useState({ width: 0, height: 0 });
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
+  const [textDraftValue, setTextDraftValue] = useState("");
+  useEffect(() => {
+    if (textDraft) {
+      setTextDraftValue("");
+      requestAnimationFrame(() => textInputRef.current?.focus());
+    }
+  }, [textDraft]);
   const width = workspace.width / zoom;
   const depth = workspace.depth / zoom;
   const screenUnit = useMemo(() => {
@@ -448,19 +491,7 @@ export function SketchWorkspace({
   }, [depth, svgSize.height, svgSize.width, width]);
   const displayProfile = useMemo(() => {
     if (pointerAction?.kind === "move-point") {
-      const source = profile.points.find((point) => point.id === pointerAction.pointId);
-      if (!source) return profile;
-      const deltaX = pointerAction.current.x - source.x;
-      const deltaZ = pointerAction.current.z - source.z;
-      return {
-        ...profile,
-        points: profile.points.map((point) => point.id === source.id ? {
-          ...point,
-          ...pointerAction.current,
-          handleIn: point.handleIn ? { x: point.handleIn.x + deltaX, z: point.handleIn.z + deltaZ } : undefined,
-          handleOut: point.handleOut ? { x: point.handleOut.x + deltaX, z: point.handleOut.z + deltaZ } : undefined,
-        } : point),
-      };
+      return moveConstrainedSketchPoint(profile, pointerAction.pointId, pointerAction.current).profile;
     }
     if (pointerAction?.kind === "move-handle") {
       return {
@@ -495,8 +526,13 @@ export function SketchWorkspace({
   }, [pointerAction, profile.images]);
   const pointById = useMemo(() => new Map(displayProfile.points.map((point) => [point.id, point])), [displayProfile.points]);
   const paths = useMemo(() => orderedPaths(displayProfile), [displayProfile]);
+  const fixedPointIds = useMemo(() => new Set((profile.constraints ?? []).flatMap((constraint) => constraint.kind === "fixed" ? [constraint.pointId] : [])), [profile.constraints]);
+  const horizontalSegmentIds = useMemo(() => new Set((profile.constraints ?? []).flatMap((constraint) => constraint.kind === "horizontal" ? [constraint.segmentId] : [])), [profile.constraints]);
+  const verticalSegmentIds = useMemo(() => new Set((profile.constraints ?? []).flatMap((constraint) => constraint.kind === "vertical" ? [constraint.segmentId] : [])), [profile.constraints]);
+  const dimensionBySegmentId = useMemo(() => new Map((profile.dimensions ?? []).map((dimension) => [dimension.segmentId, dimension])), [profile.dimensions]);
   const activePoint = activePointId ? pointById.get(activePointId) ?? null : null;
   const selectedPoint = selected?.kind === "point" ? pointById.get(selected.id) ?? null : null;
+  const selectedSegment = selected?.kind === "segment" ? displayProfile.segments.find((segment) => segment.id === selected.id) ?? null : null;
   const selectedImage = selected?.kind === "image" ? displayImages.find((image) => image.id === selected.id) ?? null : null;
   const isPointSelected = (id: string) => selected?.kind === "point" ? selected.id === id : selected?.kind === "multiple" ? selected.pointIds.includes(id) : false;
   const isSegmentSelected = (id: string) => selected?.kind === "segment" ? selected.id === id : selected?.kind === "multiple" ? selected.segmentIds.includes(id) : false;
@@ -527,6 +563,19 @@ export function SketchWorkspace({
       x: clamp(snapValue(local.x, step), -workspace.width / 2, workspace.width / 2),
       z: clamp(snapValue(local.y, step), -workspace.depth / 2, workspace.depth / 2),
     };
+  };
+
+  const svgToScreen = (svgX: number, svgZ: number) => {
+    const svg = svgRef.current;
+    const matrix = svg?.getScreenCTM();
+    if (!svg || !matrix) return { left: 0, top: 0 };
+    const svgPoint = svg.createSVGPoint();
+    svgPoint.x = svgX;
+    svgPoint.y = svgZ;
+    const screen = svgPoint.matrixTransform(matrix);
+    const stage = svg.closest(".sketch-workspace-stage")?.getBoundingClientRect();
+    if (!stage) return { left: screen.x, top: screen.y };
+    return { left: screen.x - stage.left, top: screen.y - stage.top };
   };
 
   useEffect(() => {
@@ -575,7 +624,7 @@ export function SketchWorkspace({
     } else if (tool === "select") {
       event.currentTarget.setPointerCapture(event.pointerId);
       setPointerAction({ kind: "marquee", pointerId: event.pointerId, origin: point, current: point });
-    } else if (tool === "line" || tool === "smooth" || tool === "circle-center" || tool === "circle-diameter" || tool === "measure") {
+    } else if (tool === "line" || tool === "smooth" || tool === "circle-center" || tool === "circle-diameter" || tool === "rect-corner" || tool === "rect-center" || tool === "poly-inscribed" || tool === "poly-circumscribed" || tool === "poly-edge" || tool === "text" || tool === "measure") {
       onPlanePoint(point);
     }
   };
@@ -626,7 +675,10 @@ export function SketchWorkspace({
         const imageMaxZ = image.z + image.depth / 2;
         return imageMaxX >= minX && imageMinX <= maxX && imageMaxZ >= minZ && imageMinZ <= maxZ;
       }).map((image) => image.id);
-      onSelectMany(pointIds, segmentIds, imageIds);
+      const textIds = (profile.texts ?? []).filter((text) => {
+        return text.x >= minX && text.x <= maxX && text.z >= minZ && text.z <= maxZ;
+      }).map((text) => text.id);
+      onSelectMany(pointIds, segmentIds, imageIds, textIds);
       setPointerAction(null);
       return;
     }
@@ -666,6 +718,17 @@ export function SketchWorkspace({
   const previewLabel = formatDimension(previewLength, workspace.accuracy);
   const circlePreview = circleDraft && hover ? (() => {
     return circleFromPoints(circleDraft.tool === "circle-center" ? "center-radius" : "diameter", circleDraft.first, hover);
+  })() : null;
+  const rectPreview = rectDraft && hover ? (() => {
+    return rectFromPoints(rectDraft.tool === "rect-corner" ? "corner" : "center", rectDraft.first, hover);
+  })() : null;
+  const polygonPreview = polygonDraft && hover ? (() => {
+    return polygonFromPoints(
+      polygonDraft.tool === "poly-inscribed" ? "inscribed" : polygonDraft.tool === "poly-circumscribed" ? "circumscribed" : "edge",
+      polygonDraft.sides,
+      polygonDraft.first,
+      hover,
+    );
   })() : null;
   const labelOffset = 22 * screenUnit;
   const pointRadius = 5 * screenUnit;
@@ -758,6 +821,33 @@ export function SketchWorkspace({
               />
             ))}
           </g>
+          <g className="sketch-texts">
+            {(profile.texts ?? []).map((text) => (
+              <text
+                key={text.id}
+                data-sketch-entity="text"
+                x={text.x}
+                y={text.z}
+                fontSize={text.fontSize * screenUnit}
+                textAnchor="middle"
+                dominantBaseline="central"
+                className="sketch-text-item"
+                pointerEvents={tool === "select" ? "auto" : "none"}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (event.button === 1) {
+                    beginPan(event);
+                    return;
+                  }
+                  if (event.button !== 0 || tool !== "select") return;
+                  onSelectText(text.id);
+                }}
+              >
+                {text.text}
+              </text>
+            ))}
+          </g>
           <g className="sketch-reference-shapes" pointerEvents="none">
             {referenceShapes.filter((shape) => !shape.hidden).map((shape) => {
               const footprint = referenceFootprints.get(shape.id);
@@ -795,7 +885,7 @@ export function SketchWorkspace({
             {displayProfile.segments.map((segment) => (
               <path
                 data-sketch-entity="segment"
-                className={isSegmentSelected(segment.id) ? "selected" : ""}
+                className={`${isSegmentSelected(segment.id) ? "selected" : ""} ${horizontalSegmentIds.has(segment.id) || verticalSegmentIds.has(segment.id) || dimensionBySegmentId.has(segment.id) ? "constrained" : ""}`}
                 key={segment.id}
                 d={segmentData(segment, pointById)}
                 onPointerDown={(event) => {
@@ -818,12 +908,34 @@ export function SketchWorkspace({
               const label = formatDimension(dimension.length, workspace.accuracy);
               const pill = dimensionPillSize(label, screenUnit, 18);
               return (
-                <g key={`dimension-${segment.id}`} transform={`translate(${dimension.midpoint.x} ${dimension.midpoint.z - labelOffset})`}>
+                <g className={dimensionBySegmentId.has(segment.id) ? "driving" : ""} key={`dimension-${segment.id}`} transform={`translate(${dimension.midpoint.x} ${dimension.midpoint.z - labelOffset})`}>
                   <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
                   <text y={5 * screenUnit} fontSize={13 * screenUnit}>{label}</text>
                 </g>
               );
             })}
+          </g>
+          <g className="sketch-constraint-indicators" pointerEvents="none">
+            {displayProfile.segments.map((segment) => {
+              const start = pointById.get(segment.startId);
+              const end = pointById.get(segment.endId);
+              const horizontal = horizontalSegmentIds.has(segment.id);
+              const vertical = verticalSegmentIds.has(segment.id);
+              if (!start || !end || (!horizontal && !vertical)) return null;
+              return (
+                <text
+                  key={`constraint-${segment.id}`}
+                  x={(start.x + end.x) / 2 + 9 * screenUnit}
+                  y={(start.z + end.z) / 2 + 16 * screenUnit}
+                  fontSize={12 * screenUnit}
+                >
+                  {horizontal ? "H" : "V"}
+                </text>
+              );
+            })}
+            {displayProfile.points.filter((point) => fixedPointIds.has(point.id)).map((point) => (
+              <text key={`fixed-${point.id}`} x={point.x + 8 * screenUnit} y={point.z - 8 * screenUnit} fontSize={11 * screenUnit}>F</text>
+            ))}
           </g>
           {activePoint && hover && ["line", "bezier", "smooth"].includes(tool) ? <line className="sketch-preview-line" x1={activePoint.x} y1={activePoint.z} x2={hover.x} y2={hover.z} pointerEvents="none" /> : null}
           {activePoint && hover && ["line", "bezier", "smooth"].includes(tool) ? (
@@ -862,6 +974,82 @@ export function SketchWorkspace({
                   );
                 })()}
               </g>
+            </g>
+          ) : null}
+          {rectDraft && hover && rectPreview ? (
+            <g className="sketch-rect-preview" pointerEvents="none">
+              <rect
+                x={rectPreview.minX}
+                y={rectPreview.minZ}
+                width={rectPreview.width}
+                height={rectPreview.height}
+              />
+              <line
+                className="sketch-preview-line"
+                x1={rectDraft.first.x}
+                y1={rectDraft.first.z}
+                x2={hover.x}
+                y2={hover.z}
+              />
+              <g className="sketch-segment-dimensions preview" transform={`translate(${(rectDraft.first.x + hover.x) / 2} ${(rectDraft.first.z + hover.z) / 2 - labelOffset})`}>
+                {(() => {
+                  const label = `${formatDimension(rectPreview.width, workspace.accuracy)} × ${formatDimension(rectPreview.height, workspace.accuracy)}`;
+                  const pill = dimensionPillSize(label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{label}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {polygonDraft && hover && polygonPreview ? (() => {
+            const angleStep = (2 * Math.PI) / polygonDraft.sides;
+            const vertices = Array.from({ length: polygonDraft.sides }, (_, i) => ({
+              x: polygonPreview.center.x + polygonPreview.circumR * Math.cos(polygonPreview.startAngle + i * angleStep),
+              z: polygonPreview.center.z + polygonPreview.circumR * Math.sin(polygonPreview.startAngle + i * angleStep),
+            }));
+            const polyD = vertices.map((v, i) => `${i === 0 ? "M" : "L"}${v.x} ${v.z}`).join(" ") + " Z";
+            return (
+              <g className="sketch-polygon-preview" pointerEvents="none">
+                <path d={polyD} />
+                <line
+                  className="sketch-preview-line"
+                  x1={polygonDraft.first.x}
+                  y1={polygonDraft.first.z}
+                  x2={hover.x}
+                  y2={hover.z}
+                />
+                <circle className="center" cx={polygonPreview.center.x} cy={polygonPreview.center.z} r={pointRadius} />
+                <g className="sketch-segment-dimensions preview" transform={`translate(${(polygonDraft.first.x + hover.x) / 2} ${(polygonDraft.first.z + hover.z) / 2 - labelOffset})`}>
+                  {(() => {
+                    const label = `${polygonDraft.sides}-gon  R ${formatDimension(polygonPreview.circumR, workspace.accuracy)}`;
+                    const pill = dimensionPillSize(label, screenUnit, 18);
+                    return (
+                      <>
+                        <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                        <text y={5 * screenUnit} fontSize={13 * screenUnit}>{label}</text>
+                      </>
+                    );
+                  })()}
+                </g>
+              </g>
+            );
+          })() : null}
+          {textDraft ? (
+            <g className="sketch-text-draft" pointerEvents="none">
+              <text
+                x={textDraft.position.x}
+                y={textDraft.position.z}
+                fontSize={10 * screenUnit}
+                textAnchor="middle"
+                dominantBaseline="central"
+                className="sketch-text-preview"
+              >
+                {"Click to place text"}
+              </text>
             </g>
           ) : null}
           {pointerAction?.kind === "bezier" ? (
@@ -909,7 +1097,7 @@ export function SketchWorkspace({
             {displayProfile.points.map((point) => (
               <circle
                 data-sketch-entity="point"
-                className={`${isPointSelected(point.id) ? "selected" : ""} ${activePointId === point.id ? "active" : ""}`}
+                className={`${isPointSelected(point.id) ? "selected" : ""} ${activePointId === point.id ? "active" : ""} ${fixedPointIds.has(point.id) ? "fixed" : ""}`}
                 key={point.id}
                 cx={point.x}
                 cy={point.z}
@@ -923,7 +1111,7 @@ export function SketchWorkspace({
                     onDeletePoint(point.id);
                   } else if (event.button === 0 && tool === "select") {
                     onPointPress(point.id);
-                    beginEntityDrag(event, { kind: "move-point", pointerId: event.pointerId, pointId: point.id, current: { x: point.x, z: point.z } });
+                    if (!fixedPointIds.has(point.id)) beginEntityDrag(event, { kind: "move-point", pointerId: event.pointerId, pointId: point.id, current: { x: point.x, z: point.z } });
                   } else if (event.button === 0) {
                     onPointPress(point.id);
                   }
@@ -999,13 +1187,62 @@ export function SketchWorkspace({
           {hover && ["line", "bezier", "smooth", "measure"].includes(tool) ? <circle className="sketch-cursor-point" cx={hover.x} cy={hover.z} r={hoverPointRadius} pointerEvents="none" /> : null}
         </svg>
       </section>
+      {textDraft ? (() => {
+        const pos = svgToScreen(textDraft.position.x, textDraft.position.z);
+        return (
+          <div
+            className="sketch-text-input-overlay"
+            style={{ position: "absolute", left: pos.left, top: pos.top, transform: "translate(-50%, -50%)", zIndex: 10 }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <input
+              ref={textInputRef}
+              type="text"
+              className="sketch-text-input"
+              value={textDraftValue}
+              onChange={(e) => setTextDraftValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const trimmed = textDraftValue.trim();
+                  if (trimmed) onTextSubmit(trimmed);
+                  else onTextCancel();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  onTextCancel();
+                }
+                e.stopPropagation();
+              }}
+              onBlur={() => {
+                const trimmed = textDraftValue.trim();
+                if (trimmed) onTextSubmit(trimmed);
+                else onTextCancel();
+              }}
+              placeholder="Type text..."
+            />
+          </div>
+        );
+      })() : null}
       {selectedImage && tool === "select" ? (
         <SketchImageInspector
           image={selectedImage}
           accuracy={workspace.accuracy}
-          onClose={() => onSelectMany([], [], [])}
+          onClose={() => onSelectMany([], [], [], [])}
           onUpdate={(patch, message) => onUpdateImage(selectedImage.id, patch, message)}
           onDelete={() => onDeleteImage(selectedImage.id)}
+        />
+      ) : null}
+      {selectedSegment && tool === "select" ? (
+        <SketchSegmentInspector
+          segment={selectedSegment}
+          length={segmentDimension(selectedSegment, pointById)?.length ?? 0}
+          accuracy={workspace.accuracy}
+          horizontal={horizontalSegmentIds.has(selectedSegment.id)}
+          vertical={verticalSegmentIds.has(selectedSegment.id)}
+          dimensionValue={dimensionBySegmentId.get(selectedSegment.id)?.value ?? null}
+          onClose={() => onSelectMany([], [], [], [])}
+          onToggleConstraint={(kind) => onToggleSegmentConstraint(selectedSegment.id, kind)}
+          onSetLength={(value) => onSetSegmentLength(selectedSegment.id, value)}
         />
       ) : null}
       {selectedPoint && tool === "select" ? (
@@ -1013,12 +1250,87 @@ export function SketchWorkspace({
           <button type="button" title="Make corner" onClick={() => onSetPointMode(selectedPoint.id, "corner")}><CornerDownRight /><span>Corner</span></button>
           <button type="button" title="Make smooth" onClick={() => onSetPointMode(selectedPoint.id, "smooth")}><Waves /><span>Smooth</span></button>
           <button type="button" title="Split handles" onClick={() => onSetPointMode(selectedPoint.id, "split")}><Split /><span>Split</span></button>
+          <button className={fixedPointIds.has(selectedPoint.id) ? "active" : ""} type="button" title={fixedPointIds.has(selectedPoint.id) ? "Release point" : "Fix point"} aria-pressed={fixedPointIds.has(selectedPoint.id)} onClick={() => onTogglePointFixed(selectedPoint.id)}>
+            {fixedPointIds.has(selectedPoint.id) ? <LockKeyhole /> : <LockKeyholeOpen />}
+            <span>{fixedPointIds.has(selectedPoint.id) ? "Fixed" : "Fix"}</span>
+          </button>
         </div>
       ) : null}
       <div className="grid-settings sketch-grid-settings">
         <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={setSnap} onSnapOpenChange={setSnapOpen} />
       </div>
     </main>
+  );
+}
+
+function SketchSegmentInspector({
+  segment,
+  length,
+  accuracy,
+  horizontal,
+  vertical,
+  dimensionValue,
+  onClose,
+  onToggleConstraint,
+  onSetLength,
+}: {
+  segment: SketchSegment;
+  length: number;
+  accuracy: 1 | 2 | 3;
+  horizontal: boolean;
+  vertical: boolean;
+  dimensionValue: number | null;
+  onClose: () => void;
+  onToggleConstraint: (kind: "horizontal" | "vertical") => void;
+  onSetLength: (value: number | null) => void;
+}) {
+  const editable = !segment.kind || segment.kind === "line";
+  const [draft, setDraft] = useState(formatDimension(dimensionValue ?? length, accuracy));
+  useEffect(() => setDraft(formatDimension(dimensionValue ?? length, accuracy)), [accuracy, dimensionValue, length]);
+  const commitLength = () => {
+    const value = Number(draft);
+    if (Number.isFinite(value) && value > 0) onSetLength(value);
+    else setDraft(formatDimension(dimensionValue ?? length, accuracy));
+  };
+
+  return (
+    <aside className="shape-inspector sketch-constraint-inspector" aria-label="Segment constraints" onPointerDown={(event) => event.stopPropagation()}>
+      <div className="shape-inspector-header">
+        <button className="inspector-header-icon" type="button" aria-label="Close segment constraints" onClick={onClose}>
+          <ChevronUp size={26} strokeWidth={2.8} />
+        </button>
+        <strong>Segment</strong>
+      </div>
+      <div className="property-card">
+        <div className="property-card-header static"><span>Driving dimension</span></div>
+        <div className="property-list">
+          <label className="sketch-constraint-length-field">
+            <span>Length</span>
+            <div>
+              <input
+                type="number"
+                min="0.001"
+                step={accuracy === 1 ? 0.1 : 0.01}
+                value={draft}
+                disabled={!editable}
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") commitLength(); }}
+              />
+              <span>mm</span>
+            </div>
+          </label>
+          <button className="sketch-set-dimension" type="button" disabled={!editable} onClick={commitLength}>{dimensionValue === null ? "Set driving length" : "Update driving length"}</button>
+          {dimensionValue !== null ? <button className="sketch-remove-dimension" type="button" onClick={() => onSetLength(null)}>Remove driving length</button> : null}
+        </div>
+      </div>
+      <div className="property-card">
+        <div className="property-card-header static"><span>Geometric constraints</span></div>
+        <div className="sketch-constraint-buttons">
+          <button className={horizontal ? "active" : ""} type="button" disabled={!editable} aria-pressed={horizontal} onClick={() => onToggleConstraint("horizontal")}>H <span>Horizontal</span></button>
+          <button className={vertical ? "active" : ""} type="button" disabled={!editable} aria-pressed={vertical} onClick={() => onToggleConstraint("vertical")}>V <span>Vertical</span></button>
+        </div>
+      </div>
+    </aside>
   );
 }
 
