@@ -3,6 +3,7 @@
 import { OcctKernel, type ShapeHandle } from "occt-wasm";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
 import { CAD_MODIFIER_RUNTIME_BASE, isCadModifierWasmMemoryFault } from "@/lib/cadModifierRuntime";
+import { closedCadSolidComponents } from "@/lib/cadModifierGroups";
 
 const HASH_UPPER_BOUND = 2_147_483_647;
 const CAD_EDGE_WIREFRAME_DEFLECTION = 0.035;
@@ -402,11 +403,18 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
     }
     if (request.type === "prepare") {
       releaseSession(activeCad);
-      baseShape = reconstructParts(activeCad, request.parts);
+      const reconstructed = reconstructParts(activeCad, request.parts);
+      baseSolids = closedCadSolidComponents(
+        reconstructed,
+        (shape) => activeCad.isSolid(shape),
+        (shape) => activeCad.getSubShapes(shape, "solid"),
+      );
+      if (baseSolids.length === 0) throw new Error("The selected group contains no closed solid components");
+      // OCCT wraps boolean-fused bodies in a compound even when the result is one solid.
+      // Use that solid directly so overlapping grouped parts have one closed modifier body.
+      baseShape = baseSolids.length === 1 ? baseSolids[0] : reconstructed;
       const collected = collectEdges(activeCad, baseShape, request.sharpAngle, Boolean(request.suppressTreatmentDetailEdges), true);
       edgeHandles = collected.handles;
-      baseSolids = activeCad.isSolid(baseShape) ? [baseShape] : activeCad.getSubShapes(baseShape, "solid");
-      if (baseSolids.length === 0) throw new Error("The selected group contains no closed solid components");
       const ownerEdgeHandles = baseSolids.map((solid) => activeCad.getSubShapes(solid, "edge"));
       try {
         const ownerCandidates = new Map<number, Array<{ owner: number; edge: ShapeHandle }>>();

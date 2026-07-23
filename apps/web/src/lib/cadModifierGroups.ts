@@ -12,3 +12,7 @@ export function hasOneToOneCadComponentMapping(sourceCount: number, componentOwn
   }
   return owners.size === sourceCount;
 }
+
+export function closedCadSolidComponents<T>(shape: T, isSolid: (candidate: T) => boolean, getSolids: (candidate: T) => T[]) {
+  return isSolid(shape) ? [shape] : getSolids(shape);
+}

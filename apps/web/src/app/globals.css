@@ -3094,6 +3094,49 @@ button {
   text-anchor: middle;
 }
 
+.sketch-center-points circle {
+  fill: rgba(234, 249, 245, 0.88);
+  stroke: #087d89;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-center-points line {
+  stroke: #087d89;
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-snap-feedback .guide {
+  stroke: rgba(0, 126, 145, 0.62);
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-snap-feedback .marker {
+  fill: rgba(255, 255, 255, 0.28);
+  stroke: #008ca3;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-snap-feedback .marker.center {
+  stroke: #087d89;
+}
+
+.sketch-snap-feedback .marker.midpoint {
+  stroke: #c46b00;
+}
+
+.sketch-snap-feedback text {
+  fill: #075f70;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.94);
+  stroke-width: 3px;
+  font-weight: 850;
+}
+
 .sketch-cursor-point {
   fill: #169fce;
   stroke: var(--background);
@@ -3189,10 +3232,36 @@ button {
 }
 
 .sketch-grid-settings {
+  display: grid;
+  gap: 5px;
   padding: 4px 7px;
   background: rgba(248, 251, 252, 0.92);
   border: 1px solid #d6e2e9;
   border-radius: 3px;
+}
+
+.sketch-snap-mode-buttons {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.sketch-snap-mode-buttons button {
+  height: 24px;
+  padding: 0 8px;
+  color: #5d7182;
+  background: #f5f8fa;
+  border: 1px solid #cad8e2;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.sketch-snap-mode-buttons button.active {
+  color: #086954;
+  background: #e2f6ef;
+  border-color: #72bda8;
 }
 
 .sketch-point-actions {

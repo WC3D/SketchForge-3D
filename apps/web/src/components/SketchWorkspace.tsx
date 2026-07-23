@@ -8,6 +8,7 @@ import { circleFromPoints } from "@/lib/sketchCircles";
 import { moveConstrainedSketchPoint } from "@/lib/sketchConstraints";
 import { rectFromPoints } from "@/lib/sketchRectangles";
 import { polygonFromPoints } from "@/lib/sketchPolygons";
+import { dedupeSketchSnapCandidates, snapSketchPoint, type SketchSnapCandidate, type SketchSnapResult } from "@/lib/sketchSnapping";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import type { GridSize, SketchImage, SketchPoint, SketchProfile, SketchSegment, SketchText, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
@@ -92,10 +93,6 @@ function snapStep(size: GridSize) {
   if (size === "Off") return 0;
   if (size === "Brick") return 8;
   return Number.parseFloat(size) || 1;
-}
-
-function snapValue(value: number, step: number) {
-  return step > 0 ? Math.round(value / step) * step : value;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -468,7 +465,9 @@ export function SketchWorkspace({
   const [snapOpen, setSnapOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, z: 0 });
-  const [hover, setHover] = useState<{ x: number; z: number } | null>(null);
+  const [hover, setHover] = useState<SketchSnapResult | null>(null);
+  const [snapToGridLines, setSnapToGridLines] = useState(false);
+  const [snapToGeometry, setSnapToGeometry] = useState(true);
   const [pointerAction, setPointerAction] = useState<PointerAction | null>(null);
   const [svgSize, setSvgSize] = useState({ width: 0, height: 0 });
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -550,7 +549,51 @@ export function SketchWorkspace({
     return lines;
   }, [gridStep, workspace.depth]);
 
-  const pointFromEvent = (event: { clientX: number; clientY: number }) => {
+  const centerSnapCandidates = useMemo<SketchSnapCandidate[]>(() => paths
+    .filter((path) => path.closed && path.points.length >= 3)
+    .map((path) => {
+      const xs = path.points.map((point) => point.x);
+      const zs = path.points.map((point) => point.z);
+      return {
+        id: `center:${path.id}`,
+        kind: "center" as const,
+        label: "Center",
+        x: (Math.min(...xs) + Math.max(...xs)) / 2,
+        z: (Math.min(...zs) + Math.max(...zs)) / 2,
+        ownerPointIds: path.points.map((point) => point.id),
+      };
+    }), [paths]);
+  const snapCandidates = useMemo(() => dedupeSketchSnapCandidates([
+    ...displayProfile.points.map((point) => ({
+      id: `point:${point.id}`,
+      kind: "point" as const,
+      label: "Point",
+      x: point.x,
+      z: point.z,
+      ownerPointIds: [point.id],
+    })),
+    ...displayProfile.segments.flatMap((segment) => {
+      const dimension = segmentDimension(segment, pointById);
+      return dimension ? [{
+        id: `midpoint:${segment.id}`,
+        kind: "midpoint" as const,
+        label: "Midpoint",
+        x: dimension.midpoint.x,
+        z: dimension.midpoint.z,
+        ownerPointIds: [segment.startId, segment.endId],
+      }] : [];
+    }),
+    ...centerSnapCandidates,
+    ...(profile.texts ?? []).map((text) => ({
+      id: `text:${text.id}`,
+      kind: "center" as const,
+      label: "Text anchor",
+      x: text.x,
+      z: text.z,
+    })),
+  ]), [centerSnapCandidates, displayProfile.points, displayProfile.segments, pointById, profile.texts]);
+
+  const pointFromEvent = (event: { clientX: number; clientY: number }, magnetic = true) => {
     const svg = svgRef.current;
     const matrix = svg?.getScreenCTM();
     if (!svg || !matrix) return null;
@@ -558,10 +601,21 @@ export function SketchWorkspace({
     screenPoint.x = event.clientX;
     screenPoint.y = event.clientY;
     const local = screenPoint.matrixTransform(matrix.inverse());
-    const step = snapStep(snap);
+    const candidates = pointerAction?.kind === "move-point"
+      ? snapCandidates.filter((candidate) => !candidate.ownerPointIds?.includes(pointerAction.pointId))
+      : snapCandidates;
+    const snapped = snapSketchPoint({ x: local.x, z: local.y }, {
+      precisionStep: snapStep(snap),
+      gridStep,
+      tolerance: 10 * screenUnit,
+      snapToGridLines: magnetic && snapToGridLines,
+      snapToGeometry: magnetic && snapToGeometry,
+      candidates,
+    });
     return {
-      x: clamp(snapValue(local.x, step), -workspace.width / 2, workspace.width / 2),
-      z: clamp(snapValue(local.y, step), -workspace.depth / 2, workspace.depth / 2),
+      ...snapped,
+      x: clamp(snapped.x, -workspace.width / 2, workspace.width / 2),
+      z: clamp(snapped.z, -workspace.depth / 2, workspace.depth / 2),
     };
   };
 
@@ -615,7 +669,7 @@ export function SketchWorkspace({
       return;
     }
     if (event.button !== 0 || (event.target !== event.currentTarget && (event.target as Element).closest("[data-sketch-entity]"))) return;
-    const point = pointFromEvent(event);
+    const point = pointFromEvent(event, tool !== "select");
     if (!point) return;
     event.preventDefault();
     if (tool === "bezier") {
@@ -643,7 +697,10 @@ export function SketchWorkspace({
       setPointerAction({ ...pointerAction, clientX: event.clientX, clientY: event.clientY });
       return;
     }
-    const point = pointFromEvent(event);
+    const magnetic = pointerAction
+      ? pointerAction.kind === "bezier" || pointerAction.kind === "move-point" || pointerAction.kind === "move-handle"
+      : tool !== "select";
+    const point = pointFromEvent(event, magnetic);
     setHover(point);
     if (point && pointerAction) setPointerAction({ ...pointerAction, current: point });
   };
@@ -806,7 +863,7 @@ export function SketchWorkspace({
                     return;
                   }
                   if (event.button !== 0 || tool !== "select") return;
-                  const point = pointFromEvent(event);
+                  const point = pointFromEvent(event, false);
                   if (!point) return;
                   onSelectImage(image.id);
                   beginEntityDrag(event, {
@@ -881,6 +938,25 @@ export function SketchWorkspace({
           <g className="sketch-profile-fills" pointerEvents="none">
             {paths.some((path) => path.closed) ? <path d={paths.filter((path) => path.closed).map(pathData).join(" ")} /> : null}
           </g>
+          {snapToGeometry ? (
+            <g className="sketch-center-points" pointerEvents="none">
+              {centerSnapCandidates.map((center) => (
+                <g key={center.id} transform={`translate(${center.x} ${center.z})`}>
+                  <circle r={6 * screenUnit} />
+                  <line x1={-4 * screenUnit} y1={0} x2={4 * screenUnit} y2={0} />
+                  <line x1={0} y1={-4 * screenUnit} x2={0} y2={4 * screenUnit} />
+                </g>
+              ))}
+            </g>
+          ) : null}
+          {hover?.snap ? (
+            <g className="sketch-snap-feedback" pointerEvents="none">
+              {hover.snap.xGuide !== undefined ? <line className="guide" x1={hover.snap.xGuide} y1={pan.z - depth / 2} x2={hover.snap.xGuide} y2={pan.z + depth / 2} /> : null}
+              {hover.snap.zGuide !== undefined ? <line className="guide" x1={pan.x - width / 2} y1={hover.snap.zGuide} x2={pan.x + width / 2} y2={hover.snap.zGuide} /> : null}
+              <circle className={`marker ${hover.snap.kind}`} cx={hover.x} cy={hover.z} r={8 * screenUnit} />
+              <text x={hover.x + 12 * screenUnit} y={hover.z - 10 * screenUnit} fontSize={11 * screenUnit}>{hover.snap.label}</text>
+            </g>
+          ) : null}
           <g className="sketch-segments">
             {displayProfile.segments.map((segment) => (
               <path
@@ -895,7 +971,11 @@ export function SketchWorkspace({
                   if (event.button === 1) beginPan(event);
                   else if (tool === "erase") onDeleteSegment(segment.id);
                   else if (event.button === 0 && tool === "refine" && point) onInsertPoint(segment.id, point);
-                  else if (event.button === 0 && (tool === "circle-center" || tool === "circle-diameter") && point) onPlanePoint(point);
+                  else if (event.button === 0 && tool === "bezier" && point) {
+                    svgRef.current?.setPointerCapture(event.pointerId);
+                    setPointerAction({ kind: "bezier", pointerId: event.pointerId, origin: point, current: point });
+                  }
+                  else if (event.button === 0 && point && ["line", "smooth", "circle-center", "circle-diameter", "rect-corner", "rect-center", "poly-inscribed", "poly-circumscribed", "poly-edge", "text", "measure"].includes(tool)) onPlanePoint(point);
                   else if (event.button === 0) onSelectSegment(segment.id);
                 }}
               />
@@ -1169,7 +1249,7 @@ export function SketchWorkspace({
                       return;
                     }
                     if (event.button !== 0) return;
-                    const point = pointFromEvent(event);
+                    const point = pointFromEvent(event, false);
                     if (!point) return;
                     beginEntityDrag(event, {
                       kind: "resize-image",
@@ -1258,6 +1338,10 @@ export function SketchWorkspace({
       ) : null}
       <div className="grid-settings sketch-grid-settings">
         <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={setSnap} onSnapOpenChange={setSnapOpen} />
+        <div className="sketch-snap-mode-buttons" role="group" aria-label="Sketch magnetic snapping">
+          <button type="button" className={snapToGridLines ? "active" : ""} aria-pressed={snapToGridLines} onClick={() => setSnapToGridLines((enabled) => !enabled)}>Grid lines</button>
+          <button type="button" className={snapToGeometry ? "active" : ""} aria-pressed={snapToGeometry} onClick={() => setSnapToGeometry((enabled) => !enabled)}>Geometry</button>
+        </div>
       </div>
     </main>
   );

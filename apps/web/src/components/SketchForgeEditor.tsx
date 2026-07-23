@@ -6284,7 +6284,7 @@ export function SketchForgeEditor({
         setSketchActivePointId(null);
         return;
       }
-      if (sketchTool === "circle-center" || sketchTool === "circle-diameter") {
+      if (["circle-center", "circle-diameter", "rect-corner", "rect-center", "poly-inscribed", "poly-circumscribed", "poly-edge", "text"].includes(sketchTool)) {
         addSketchPlanePoint({ x: point.x, z: point.z });
         return;
       }
