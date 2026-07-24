@@ -1414,6 +1414,10 @@ button {
   min-width: 150px;
 }
 
+.sketch-transform-section {
+  min-width: 240px;
+}
+
 .sketch-history-section {
   min-width: 104px;
 }
@@ -2727,6 +2731,224 @@ button {
   background: var(--background);
 }
 
+.sketch-operation-panel {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 14;
+  display: flex;
+  width: min(320px, calc(100vw - 36px));
+  padding: 14px;
+  flex-direction: column;
+  gap: 13px;
+  color: #29465a;
+  background: rgba(250, 253, 255, 0.97);
+  border: 1px solid #b9ccd9;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(24, 49, 67, 0.2);
+}
+
+.construction-plane-panel {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 14;
+  display: flex;
+  width: min(340px, calc(100vw - 36px));
+  max-height: calc(100vh - var(--editor-toolbar-height) - 36px);
+  padding: 14px;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  color: #29465a;
+  background: rgba(250, 253, 255, 0.98);
+  border: 1px solid #b9ccd9;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(24, 49, 67, 0.2);
+}
+
+.construction-plane-active,
+.construction-plane-create,
+.construction-plane-face {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.construction-plane-active > span,
+.construction-plane-face > span {
+  color: #50697a;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.construction-plane-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #50697a;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.construction-plane-panel input,
+.construction-plane-panel select,
+.construction-plane-panel button:not(.sketch-operation-header button) {
+  min-height: 32px;
+  padding: 0 9px;
+  color: #355064;
+  background: #fff;
+  border: 1px solid #b9cad6;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.construction-plane-panel button.active,
+.construction-plane-panel button.primary {
+  color: #fff;
+  background: #087fae;
+  border-color: #087fae;
+}
+
+.construction-plane-face small {
+  color: #6d8290;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.sketch-operation-header,
+.sketch-operation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sketch-operation-header strong {
+  font-size: 14px;
+}
+
+.sketch-operation-header button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  color: #5f7280;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.sketch-operation-header button:hover {
+  background: #e7f1f6;
+}
+
+.sketch-operation-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #50697a;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sketch-operation-panel input,
+.sketch-operation-panel select {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  color: #263f51;
+  background: #fff;
+  border: 1px solid #b9cad6;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 700;
+}
+
+.sketch-operation-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sketch-operation-fields .wide {
+  grid-column: 1 / -1;
+}
+
+.sketch-offset-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sketch-offset-fields .sketch-operation-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+
+.sketch-offset-fields .sketch-operation-checkbox input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.sketch-offset-fields p {
+  margin: 0;
+  color: #617888;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.sketch-operation-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #536d7d;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sketch-operation-copy p {
+  margin: 0;
+}
+
+.sketch-operation-copy span {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sketch-operation-actions {
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.sketch-operation-actions button {
+  min-width: 76px;
+  height: 32px;
+  padding: 0 12px;
+  color: #496276;
+  background: #fff;
+  border: 1px solid #b9cad6;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.sketch-operation-actions button.primary {
+  color: #fff;
+  background: #087fae;
+  border-color: #087fae;
+}
+
 .sketch-mode-badge {
   position: absolute;
   top: 8px;
@@ -2909,6 +3131,13 @@ button {
   stroke: #087d89;
 }
 
+.sketch-segments path.projected {
+  stroke: #8f55c5;
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+  cursor: default;
+}
+
 .sketch-segments path:hover,
 .sketch-segments path.selected {
   stroke: #ff8a00;
@@ -3088,6 +3317,12 @@ button {
   stroke-width: 2;
 }
 
+.sketch-points circle.projected {
+  fill: #f4edfb;
+  stroke: #8f55c5;
+  cursor: default;
+}
+
 .sketch-constraint-indicators text {
   fill: #087d89;
   font-weight: 900;
@@ -3155,6 +3390,22 @@ button {
   fill: #16283a;
   font-weight: 500;
   text-anchor: middle;
+  pointer-events: none;
+  user-select: none;
+}
+
+.sketch-segment-dimensions .movable {
+  cursor: move;
+}
+
+.sketch-segment-dimensions .movable:hover rect,
+.sketch-segment-dimensions .movable.dragging rect {
+  stroke: #2692bd;
+  stroke-width: 1.5;
+}
+
+.sketch-segment-dimensions .movable.dragging {
+  cursor: grabbing;
 }
 
 .sketch-segment-dimensions.preview rect {

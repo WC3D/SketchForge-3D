@@ -123,6 +123,35 @@ describe("SketchForge .skf project packages", () => {
     expect(document.assets.filter((entry) => entry.kind === "derived-mesh")).toHaveLength(0);
   });
 
+  it("round-trips construction planes and sketch plane attachments", async () => {
+    const pose = { origin: [12, 4, -3], quaternion: [0, 0, 0, 1] } as const;
+    const plane = shape("constructionPlane", "plane-1", {
+      name: "Offset XZ plane",
+      constructionPlane: { kind: "principal", principal: "xz", offset: 4, pose },
+      locked: true,
+      height: 0.1,
+    });
+    const sketch = shape("mesh", "sketch-on-plane", {
+      sketchProfile: {
+        points: [{ id: "p1", x: 0, z: 0, projectionId: "projection-1" }, { id: "p2", x: 10, z: 0, projectionId: "projection-1" }, { id: "p3", x: 0, z: 10 }],
+        segments: [
+          { id: "s1", startId: "p1", endId: "p2", kind: "line", projectionId: "projection-1" },
+          { id: "s2", startId: "p2", endId: "p3", kind: "line" },
+          { id: "s3", startId: "p3", endId: "p1", kind: "line" },
+        ],
+        projections: [{ id: "projection-1", sourceShapeId: "source-shape", sourceName: "Source shape", sourceKind: "intersection" }],
+      },
+      sketchFeature: { kind: "extrusion" },
+      sketchPlane: { constructionPlaneId: plane.id, pose, localCenter: [5, 8, 5] },
+    });
+
+    const restored = await importSkfProject(await exportSkfProject(input([plane, sketch])));
+
+    expect(restored.shapes).toEqual([canonicalizeShape(plane), canonicalizeShape(sketch)]);
+    expect(restored.shapes[0].constructionPlane?.kind).toBe("principal");
+    expect(restored.shapes[1].sketchPlane?.constructionPlaneId).toBe("plane-1");
+  });
+
   it("preserves nested groups, holes, intersection metadata, edge history, B-Rep, and undo/redo", async () => {
     const solid = shape("box", "solid", { x: 0 });
     const hole = shape("cylinder", "hole", { hole: true, color: "#b8c2cc", x: 4 });

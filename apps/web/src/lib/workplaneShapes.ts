@@ -193,6 +193,9 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.importedMesh === b.importedMesh &&
     a.imagePlate === b.imagePlate &&
     a.sketchProfile === b.sketchProfile &&
+    a.sketchFeature === b.sketchFeature &&
+    a.constructionPlane === b.constructionPlane &&
+    a.sketchPlane === b.sketchPlane &&
     a.edgeTreatments === b.edgeTreatments &&
     a.edgeTreatmentHistory === b.edgeTreatmentHistory &&
     a.cadDisplayEdges === b.cadDisplayEdges &&

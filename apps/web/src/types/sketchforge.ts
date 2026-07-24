@@ -1,4 +1,5 @@
 import type { AppTheme } from "@/lib/themes";
+import type { ConstructionPlaneAttachment, ConstructionPlanePose, PrincipalPlane, Vector3Tuple } from "@/lib/constructionPlanes";
 
 export type ShapeKind =
   | "box"
@@ -18,6 +19,7 @@ export type ShapeKind =
   | "wedge"
   | "polygon"
   | "icosahedron"
+  | "constructionPlane"
   | "mesh";
 
 export type ShapeAsset = {
@@ -79,6 +81,7 @@ export type SketchPoint = {
   handleIn?: { x: number; z: number };
   handleOut?: { x: number; z: number };
   mode?: "corner" | "smooth" | "split";
+  projectionId?: string;
 };
 
 export type SketchSegment = {
@@ -86,6 +89,15 @@ export type SketchSegment = {
   startId: string;
   endId: string;
   kind?: "line" | "bezier" | "smooth";
+  dimensionLabelOffset?: { x: number; z: number };
+  projectionId?: string;
+};
+
+export type SketchProjectionLink = {
+  id: string;
+  sourceShapeId: string;
+  sourceName: string;
+  sourceKind: "sketch" | "intersection";
 };
 
 export type SketchConstraint =
@@ -129,6 +141,21 @@ export type SketchProfile = {
   dimensions?: SketchDimension[];
   images?: SketchImage[];
   texts?: SketchText[];
+  projections?: SketchProjectionLink[];
+};
+
+export type SketchFeature =
+  | { kind: "extrusion" }
+  | { kind: "sweep"; sectionSegmentIds: string[]; pathSegmentIds: string[] };
+
+export type ConstructionPlaneDefinition =
+  | { kind: "principal"; principal: PrincipalPlane; offset: number; pose: ConstructionPlanePose }
+  | { kind: "face"; sourceShapeId: string; attachment: ConstructionPlaneAttachment; pose: ConstructionPlanePose };
+
+export type SketchPlaneAttachment = {
+  constructionPlaneId: string;
+  pose: ConstructionPlanePose;
+  localCenter: Vector3Tuple;
 };
 
 export type EdgeTreatmentFeature = {
@@ -232,6 +259,9 @@ export type WorkplaneShape = {
     pixelHeight: number;
   };
   sketchProfile?: SketchProfile;
+  sketchFeature?: SketchFeature;
+  constructionPlane?: ConstructionPlaneDefinition;
+  sketchPlane?: SketchPlaneAttachment;
   edgeTreatments?: EdgeTreatmentFeature[];
   edgeTreatmentHistory?: EdgeTreatmentHistoryEntry[];
   cadDisplayEdges?: CadDisplayEdge[];

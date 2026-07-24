@@ -1,9 +1,9 @@
 "use client";
 
-import { Check, Circle, CircleDot, CloudUpload, Download, FolderOpen, Hexagon, Pentagon, Square, Type, X } from "lucide-react";
+import { Check, Circle, CircleDot, CloudUpload, CopyPlus, Download, FolderOpen, Grid2X2, Hexagon, Pentagon, RotateCw, Route, ScanLine, Square, Type, X } from "lucide-react";
 import type manifoldModule from "manifold-3d";
 import type { ManifoldToplevel } from "manifold-3d";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ADDITION, Brush, Evaluator, HOLLOW_INTERSECTION, HOLLOW_SUBTRACTION, INTERSECTION, SUBTRACTION, type CSGOperation } from "three-bvh-csg";
 import * as THREE from "three";
 import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
@@ -83,7 +83,22 @@ import { moveConstrainedSketchPoint, pruneSketchParameters, setSketchPointFixed,
 import { rectFromPoints, rectangleSketchGeometry } from "@/lib/sketchRectangles";
 import { textSketchGeometry } from "@/lib/sketchTextGeometry";
 import { polygonFromPoints, polygonSketchGeometry } from "@/lib/sketchPolygons";
+import { offsetSketchSegments } from "@/lib/sketchOffset";
+import { intersectMeshWithPlane, projectSketchProfileToPlane, type SketchProjectionResult } from "@/lib/sketchProjection";
+import { buildSketchSweepGeometry } from "@/lib/sketchSweep";
+import { reflectionTransform, rotationTransform, transformSketchSelection, translationTransform, type SketchTransformSelection } from "@/lib/sketchTransforms";
 import { projectExportFileName } from "@/lib/exportNames";
+import {
+  BASE_CONSTRUCTION_PLANE_POSE,
+  constructionPlaneAttachmentFromWorldPose,
+  localPointToWorld,
+  poseFromWorldOriginAndNormal,
+  principalPlanePose,
+  resolveConstructionPlaneAttachment,
+  shapeCenterInConstructionPlane,
+  type ConstructionPlanePose,
+  type PrincipalPlane,
+} from "@/lib/constructionPlanes";
 import { attachProjectAsset, dedupeProjectAssets, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
 import { findSketchOutlineIntersection } from "@/lib/sketchProfileValidation";
 import { exportSkfProject, SKF_MEDIA_TYPE } from "@/lib/skfProject";
@@ -113,6 +128,12 @@ type DirectExportFormat = Exclude<ExportFormat, "step" | "skf">;
 type SkfHistoryLimit = EditorHistoryExportLimit;
 type SkfExportTarget = "download" | "shared";
 type ToolbarMode = "geometry" | "sketch";
+type SketchCommandKind = "sweep" | "project" | "offset" | "mirror" | "rectangular-pattern" | "circular-pattern";
+type SketchOffsetCommandOptions = { distance: number; includeConnected: boolean };
+type SketchProjectCommandOptions = { sourceShapeId: string; linked: boolean };
+type SketchMirrorOptions = { axis: "x" | "z" | "segment"; segmentId?: string };
+type SketchRectangularPatternOptions = { columns: number; rows: number; columnSpacing: number; rowSpacing: number; segmentId?: string };
+type SketchCircularPatternOptions = { count: number; angle: number; pointId?: string };
 type Vec3 = [number, number, number];
 type MeshData = { name: string; vertices: Vec3[]; faces: [number, number, number][] };
 type Cuboid = { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
@@ -203,6 +224,7 @@ const POINT_TOLERANCE = 0.0001;
 const CUTTER_RESIDUAL_INSET = CUTTER_PADDING * 0.4;
 const MIN_SHAPE_DIMENSION = 0.01;
 const MAX_SKETCH_HISTORY_ENTRIES = 100;
+const BASE_CONSTRUCTION_PLANE_ID = "construction-plane-base";
 const MODEL_DIMENSION_PRECISION = 3;
 const IMPORTED_EXACT_BOOLEAN_TRIANGLE_LIMIT = 150000;
 const COPLANAR_BOOLEAN_RESCUE_DEGREES = 0.02;
@@ -232,12 +254,144 @@ function cloneSketchProfile(profile: SketchProfile): SketchProfile {
       handleIn: point.handleIn ? { ...point.handleIn } : undefined,
       handleOut: point.handleOut ? { ...point.handleOut } : undefined,
     })),
-    segments: profile.segments.map((segment) => ({ ...segment })),
+    segments: profile.segments.map((segment) => ({
+      ...segment,
+      dimensionLabelOffset: segment.dimensionLabelOffset ? { ...segment.dimensionLabelOffset } : undefined,
+    })),
     constraints: (profile.constraints ?? []).map((constraint) => ({ ...constraint })),
     dimensions: (profile.dimensions ?? []).map((dimension) => ({ ...dimension })),
     images: (profile.images ?? []).map((image) => ({ ...image })),
     texts: (profile.texts ?? []).map((text) => ({ ...text })),
+    projections: (profile.projections ?? []).map((projection) => ({ ...projection })),
   };
+}
+
+function sketchTransformSelection(selection: SketchSelection): SketchTransformSelection {
+  if (!selection) return { pointIds: [], segmentIds: [], imageIds: [], textIds: [] };
+  if (selection.kind === "point") return { pointIds: [selection.id], segmentIds: [], imageIds: [], textIds: [] };
+  if (selection.kind === "segment") return { pointIds: [], segmentIds: [selection.id], imageIds: [], textIds: [] };
+  if (selection.kind === "image") return { pointIds: [], segmentIds: [], imageIds: [selection.id], textIds: [] };
+  if (selection.kind === "text") return { pointIds: [], segmentIds: [], imageIds: [], textIds: [selection.id] };
+  return {
+    pointIds: selection.pointIds,
+    segmentIds: selection.segmentIds,
+    imageIds: selection.imageIds ?? [],
+    textIds: selection.textIds ?? [],
+  };
+}
+
+function withoutSketchReferenceSegment(profile: SketchProfile, selection: SketchTransformSelection, segmentId?: string) {
+  if (!segmentId) return selection;
+  const reference = profile.segments.find((segment) => segment.id === segmentId);
+  if (!reference) return selection;
+  return {
+    ...selection,
+    pointIds: selection.pointIds.filter((id) => id !== reference.startId && id !== reference.endId),
+    segmentIds: selection.segmentIds.filter((id) => id !== segmentId),
+  };
+}
+
+function hasSketchTransformSelection(selection: SketchTransformSelection) {
+  return selection.pointIds.length + selection.segmentIds.length + selection.imageIds.length + selection.textIds.length > 0;
+}
+
+function planeEulerDegrees(pose: ConstructionPlanePose) {
+  const quaternion = new THREE.Quaternion(...pose.quaternion).normalize();
+  const euler = new THREE.Euler().setFromQuaternion(quaternion, "XYZ");
+  return {
+    rotationX: THREE.MathUtils.radToDeg(euler.x),
+    rotation: THREE.MathUtils.radToDeg(euler.y),
+    rotationZ: THREE.MathUtils.radToDeg(euler.z),
+  };
+}
+
+function resolvedConstructionPlanePose(plane: WorkplaneShape, shapes: WorkplaneShape[]): ConstructionPlanePose | null {
+  const definition = plane.constructionPlane;
+  if (!definition) return null;
+  if (definition.kind === "principal") return principalPlanePose(definition.principal, definition.offset);
+  const source = shapes.find((shape) => shape.id === definition.sourceShapeId);
+  return source ? resolveConstructionPlaneAttachment(definition.attachment, source) : definition.pose;
+}
+
+function constructionPlanePoseById(id: string, shapes: WorkplaneShape[], fallback = BASE_CONSTRUCTION_PLANE_POSE) {
+  if (id === BASE_CONSTRUCTION_PLANE_ID) return BASE_CONSTRUCTION_PLANE_POSE;
+  const plane = shapes.find((shape) => shape.id === id && shape.kind === "constructionPlane");
+  return plane ? resolvedConstructionPlanePose(plane, shapes) ?? plane.constructionPlane?.pose ?? fallback : fallback;
+}
+
+function constructionPlaneShapeWithPose(shape: WorkplaneShape, pose: ConstructionPlanePose): WorkplaneShape {
+  const rotation = planeEulerDegrees(pose);
+  return canonicalizeShape({
+    ...shape,
+    x: pose.origin[0],
+    z: pose.origin[2],
+    elevation: pose.origin[1] - shape.height / 2,
+    ...rotation,
+    constructionPlane: shape.constructionPlane ? { ...shape.constructionPlane, pose } : undefined,
+  });
+}
+
+function createConstructionPlaneShape(name: string, definition: NonNullable<WorkplaneShape["constructionPlane"]>, width: number, depth: number) {
+  return constructionPlaneShapeWithPose({
+    id: createLocalId("construction-plane"),
+    name,
+    kind: "constructionPlane",
+    color: "#20a8d8",
+    x: definition.pose.origin[0],
+    z: definition.pose.origin[2],
+    elevation: definition.pose.origin[1] - 0.05,
+    size: Math.max(width, depth),
+    width,
+    depth,
+    height: 0.1,
+    rotation: 0,
+    locked: true,
+    constructionPlane: definition,
+  }, definition.pose);
+}
+
+function sketchShapeWithPlanePose(shape: WorkplaneShape, constructionPlaneId: string, pose: ConstructionPlanePose, localCenter?: [number, number, number]) {
+  const center = localCenter ?? [shape.x, (shape.elevation ?? 0) + shape.height / 2, shape.z];
+  const worldCenter = localPointToWorld(pose, center);
+  const rotation = planeEulerDegrees(pose);
+  return canonicalizeShape({
+    ...shape,
+    x: worldCenter[0],
+    z: worldCenter[2],
+    elevation: worldCenter[1] - shape.height / 2,
+    ...rotation,
+    sketchPlane: { constructionPlaneId, pose, localCenter: [...center] },
+  });
+}
+
+function shapePlacementChanged(shape: WorkplaneShape, previous?: WorkplaneShape) {
+  return Boolean(previous && (
+    Math.abs(shape.x - previous.x) > 1e-9
+    || Math.abs(shape.z - previous.z) > 1e-9
+    || Math.abs((shape.elevation ?? 0) - (previous.elevation ?? 0)) > 1e-9
+  ));
+}
+
+function refreshConstructionPlaneShapes(shapes: WorkplaneShape[], previousShapes: WorkplaneShape[] = []) {
+  const withUpdatedSketchCenters = shapes.map((shape) => {
+    if (!shape.sketchPlane || !shapePlacementChanged(shape, previousShapes.find((previous) => previous.id === shape.id))) return shape;
+    const pose = constructionPlanePoseById(shape.sketchPlane.constructionPlaneId, shapes, shape.sketchPlane.pose);
+    const localCenter = shapeCenterInConstructionPlane(shape, pose);
+    return { ...shape, sketchPlane: { ...shape.sketchPlane, pose, localCenter } };
+  });
+  const refreshPlanes = (entries: WorkplaneShape[]) => entries.map((shape) => {
+    if (shape.kind !== "constructionPlane") return shape;
+    const pose = resolvedConstructionPlanePose(shape, entries);
+    return pose ? constructionPlaneShapeWithPose(shape, pose) : shape;
+  });
+  const applySketchPlanes = (entries: WorkplaneShape[]) => entries.map((shape) => {
+    if (!shape.sketchPlane) return shape;
+    const plane = entries.find((candidate) => candidate.id === shape.sketchPlane?.constructionPlaneId);
+    const pose = plane ? resolvedConstructionPlanePose(plane, entries) : shape.sketchPlane.pose;
+    return pose ? sketchShapeWithPlanePose(shape, shape.sketchPlane.constructionPlaneId, pose, shape.sketchPlane.localCenter) : shape;
+  });
+  const firstAttachmentPass = applySketchPlanes(refreshPlanes(withUpdatedSketchCenters));
+  return applySketchPlanes(refreshPlanes(firstAttachmentPass));
 }
 
 type OrderedSketchStep = { segment: SketchProfile["segments"][number]; from: SketchPoint; to: SketchPoint };
@@ -517,6 +671,86 @@ async function shapeFromSketchProfile(profile: SketchProfile, height: number, ex
     },
     sketchProfile: cloneSketchProfile(profile),
   } satisfies WorkplaneShape);
+}
+
+function shapeFromSketchSweep(profile: SketchProfile, selectedSegmentIds: readonly string[], existing?: WorkplaneShape | null) {
+  const { geometry, section, path } = buildSketchSweepGeometry(profile, selectedSegmentIds);
+  try {
+    geometry.computeBoundingBox();
+    const bounds = geometry.boundingBox;
+    if (!bounds) throw new Error("The sweep did not produce any geometry");
+    const centerX = (bounds.min.x + bounds.max.x) / 2;
+    const centerZ = (bounds.min.z + bounds.max.z) / 2;
+    const minY = bounds.min.y;
+    const rawWidth = Math.max(MIN_SHAPE_DIMENSION, bounds.max.x - bounds.min.x);
+    const rawDepth = Math.max(MIN_SHAPE_DIMENSION, bounds.max.z - bounds.min.z);
+    const rawHeight = Math.max(MIN_SHAPE_DIMENSION, bounds.max.y - bounds.min.y);
+    const meshGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
+    try {
+      const position = meshGeometry.getAttribute("position");
+      const normal = meshGeometry.getAttribute("normal");
+      if (!position || position.count < 3) throw new Error("The sweep did not produce any triangles");
+      const positions = Array.from(position.array as ArrayLike<number>);
+      for (let index = 0; index + 2 < positions.length; index += 3) {
+        positions[index] -= centerX;
+        positions[index + 1] -= minY;
+        positions[index + 2] -= centerZ;
+      }
+      const normals = normal ? Array.from(normal.array as ArrayLike<number>) : undefined;
+      const width = cleanModelDimension(rawWidth);
+      const depth = cleanModelDimension(rawDepth);
+      const height = cleanModelDimension(rawHeight);
+      return canonicalizeShape({
+        ...(existing ?? {
+          id: createLocalId("sketch-sweep"),
+          name: "Sketch sweep",
+          color: "#d41721",
+          hole: false,
+        }),
+        kind: "mesh",
+        x: cleanNearZero(centerX, 0.0005),
+        z: cleanNearZero(centerZ, 0.0005),
+        elevation: cleanNearZero(minY, 0.0005),
+        size: Math.max(width, depth),
+        width,
+        depth,
+        height,
+        rotation: 0,
+        rotationX: 0,
+        rotationZ: 0,
+        mirrorX: undefined,
+        mirrorY: undefined,
+        mirrorZ: undefined,
+        importedMesh: {
+          positions,
+          normals: normals?.length === positions.length ? normals : undefined,
+          baseWidth: rawWidth,
+          baseDepth: rawDepth,
+          baseHeight: rawHeight,
+          triangleCount: Math.floor(positions.length / 9),
+          sourceFormat: "json",
+        },
+        imagePlate: undefined,
+        sketchProfile: cloneSketchProfile(profile),
+        sketchFeature: {
+          kind: "sweep",
+          sectionSegmentIds: section.steps.map((step) => step.segment.id),
+          pathSegmentIds: path.steps.map((step) => step.segment.id),
+        },
+        edgeTreatments: undefined,
+        edgeTreatmentHistory: undefined,
+        cadDisplayEdges: undefined,
+        cadDisplayEdgesVersion: undefined,
+        cadBrep: undefined,
+        cadBrepFrame: undefined,
+        cadPrimitiveFrame: undefined,
+      } satisfies WorkplaneShape);
+    } finally {
+      if (meshGeometry !== geometry) meshGeometry.dispose();
+    }
+  } finally {
+    geometry.dispose();
+  }
 }
 
 let sketchCadWorker: Worker | null = null;
@@ -2162,6 +2396,82 @@ function meshForShape(shape: WorkplaneShape): MeshData {
             ? cylinderMesh(shape, shape.sides ?? 4, 0)
             : boxMesh(shape));
   return transformMesh(raw, shape);
+}
+
+function nativeProjectionSourceProfile(profile: SketchProfile): SketchProfile {
+  const projectedPointIds = new Set(profile.points.filter((point) => point.projectionId).map((point) => point.id));
+  return {
+    ...profile,
+    points: profile.points.filter((point) => !point.projectionId),
+    segments: profile.segments.filter((segment) => !segment.projectionId && !projectedPointIds.has(segment.startId) && !projectedPointIds.has(segment.endId)),
+    constraints: [],
+    dimensions: [],
+    images: [],
+    texts: [],
+    projections: [],
+  };
+}
+
+function sketchProfileCenter(profile: SketchProfile) {
+  if (!profile.points.length) return { x: 0, z: 0 };
+  return {
+    x: (Math.min(...profile.points.map((point) => point.x)) + Math.max(...profile.points.map((point) => point.x))) / 2,
+    z: (Math.min(...profile.points.map((point) => point.z)) + Math.max(...profile.points.map((point) => point.z))) / 2,
+  };
+}
+
+function projectShapeToSketchPlane(
+  source: WorkplaneShape,
+  sceneShapes: WorkplaneShape[],
+  targetPose: ConstructionPlanePose,
+  projectionId?: string,
+): SketchProjectionResult {
+  if (source.sketchProfile) {
+    const profile = nativeProjectionSourceProfile(source.sketchProfile);
+    const center = sketchProfileCenter(profile);
+    const sourcePose = source.sketchPlane
+      ? constructionPlanePoseById(source.sketchPlane.constructionPlaneId, sceneShapes, source.sketchPlane.pose)
+      : BASE_CONSTRUCTION_PLANE_POSE;
+    const localCenter = source.sketchPlane?.localCenter ?? [source.x, (source.elevation ?? 0) + source.height / 2, source.z];
+    return projectSketchProfileToPlane(
+      profile,
+      sourcePose,
+      targetPose,
+      [localCenter[0] - center.x, localCenter[1] - source.height / 2, localCenter[2] - center.z],
+      createLocalId,
+      projectionId,
+    );
+  }
+  const mesh = meshForShape(source);
+  return intersectMeshWithPlane(mesh.vertices, mesh.faces, targetPose, createLocalId, projectionId);
+}
+
+function refreshLinkedSketchProjections(
+  profile: SketchProfile,
+  sceneShapes: WorkplaneShape[],
+  constructionPlaneId: string,
+) {
+  const links = profile.projections ?? [];
+  if (!links.length) return profile;
+  const linkedIds = new Set(links.map((link) => link.id));
+  const retainedPointIds = new Set(profile.points.filter((point) => !point.projectionId || !linkedIds.has(point.projectionId)).map((point) => point.id));
+  let refreshed: SketchProfile = {
+    ...profile,
+    points: profile.points.filter((point) => retainedPointIds.has(point.id)),
+    segments: profile.segments.filter((segment) => (!segment.projectionId || !linkedIds.has(segment.projectionId)) && retainedPointIds.has(segment.startId) && retainedPointIds.has(segment.endId)),
+  };
+  const targetPose = constructionPlanePoseById(constructionPlaneId, sceneShapes);
+  for (const link of links) {
+    const source = sceneShapes.find((shape) => shape.id === link.sourceShapeId && shape.kind !== "constructionPlane");
+    if (!source) continue;
+    const projected = projectShapeToSketchPlane(source, sceneShapes, targetPose, link.id);
+    refreshed = {
+      ...refreshed,
+      points: [...refreshed.points, ...projected.points],
+      segments: [...refreshed.segments, ...projected.segments],
+    };
+  }
+  return pruneSketchParameters(refreshed);
 }
 
 function appendMeshData(vertices: Vec3[], faces: [number, number, number][], mesh: MeshData) {
@@ -5254,7 +5564,7 @@ export function SketchForgeEditor({
 } = {}) {
   const initialSceneRef = useRef<WorkplaneShape[] | null>(null);
   if (initialSceneRef.current === null) {
-    initialSceneRef.current = initialShapes.map(canonicalizeShape);
+    initialSceneRef.current = refreshConstructionPlaneShapes(initialShapes.map(canonicalizeShape));
   }
   const initialHistoryStateRef = useRef<EditorHistoryState | null>(null);
   if (initialHistoryStateRef.current === null) {
@@ -5268,6 +5578,8 @@ export function SketchForgeEditor({
   const [history, setHistory] = useState<EditorHistoryEntry[]>(() => (initialHistoryStateRef.current as EditorHistoryState).entries);
   const [historyIndex, setHistoryIndex] = useState(() => (initialHistoryStateRef.current as EditorHistoryState).index);
   const [placementElevation, setPlacementElevation] = useState(() => Number.isFinite(initialPlacementElevation) ? initialPlacementElevation : 0);
+  const [activeConstructionPlaneId, setActiveConstructionPlaneId] = useState(BASE_CONSTRUCTION_PLANE_ID);
+  const [constructionPlanePanelOpen, setConstructionPlanePanelOpen] = useState(false);
   const [workspaceSettings, setWorkspaceSettings] = useState<WorkplaneWorkspaceSettings>(() => normalizeWorkspaceSettings(initialWorkspace));
   const [snapGrid, setSnapGrid] = useState<GridSize>(() => normalizeSnapGrid(initialSnap));
   const [workplaneMode, setWorkplaneMode] = useState(false);
@@ -5353,6 +5665,8 @@ export function SketchForgeEditor({
   const [sketchPolygonDraft, setSketchPolygonDraft] = useState<SketchPolygonDraft | null>(null);
   const [sketchPolygonSides, setSketchPolygonSides] = useState(6);
   const [sketchTextDraft, setSketchTextDraft] = useState<SketchTextDraft | null>(null);
+  const [sketchCommand, setSketchCommand] = useState<SketchCommandKind | null>(null);
+  const [sketchConstructionPlaneId, setSketchConstructionPlaneId] = useState(BASE_CONSTRUCTION_PLANE_ID);
   const [editingSketchShapeId, setEditingSketchShapeId] = useState<string | null>(null);
   const [edgeModifier, setEdgeModifier] = useState<EdgeModifierSession | null>(null);
   const edgeModifierRef = useRef<EdgeModifierSession | null>(null);
@@ -5657,6 +5971,16 @@ export function SketchForgeEditor({
   const selectedShapes = useMemo(() => shapes.filter((shape) => selectedIds.includes(shape.id)), [selectedIds, shapes]);
   const selectedShape = selectedShapes.at(-1) ?? null;
   const hasSelection = selectedShapes.length > 0;
+  const constructionPlanes = useMemo(() => shapes.filter((shape) => shape.kind === "constructionPlane" && shape.constructionPlane), [shapes]);
+  const activeConstructionPlane = useMemo(
+    () => constructionPlanes.find((plane) => plane.id === activeConstructionPlaneId) ?? null,
+    [activeConstructionPlaneId, constructionPlanes],
+  );
+  useEffect(() => {
+    if (activeConstructionPlaneId !== BASE_CONSTRUCTION_PLANE_ID && !activeConstructionPlane) {
+      setActiveConstructionPlaneId(BASE_CONSTRUCTION_PLANE_ID);
+    }
+  }, [activeConstructionPlane, activeConstructionPlaneId]);
   const modifierAvailableEdgeIds = useMemo(
     () => edgeModifier ? edgeModifier.edges.filter((edge) => selectableCadModifierEdge(edge, edgeModifier.sharpAngle)).map((edge) => edge.id) : [],
     [edgeModifier?.edges, edgeModifier?.sharpAngle],
@@ -5686,7 +6010,7 @@ export function SketchForgeEditor({
       return { ...current, selectedEdgeIds: [...next], preview: null, busy: next.size > 0, error: next.size ? null : "Select at least one highlighted edge" };
     });
   }, []);
-  const exportableShapeCount = useMemo(() => (hasSelection ? selectedShapes : shapes).filter((shape) => !shape.hole).length, [hasSelection, selectedShapes, shapes]);
+  const exportableShapeCount = useMemo(() => (hasSelection ? selectedShapes : shapes).filter((shape) => !shape.hole && shape.kind !== "constructionPlane").length, [hasSelection, selectedShapes, shapes]);
   const exportScopeLabel = hasSelection ? "selected" : "total";
   const effectiveAlignAnchorId = useMemo(
     () => effectiveAlignmentAnchorId(selectedShapes, alignAnchorId),
@@ -5894,7 +6218,7 @@ export function SketchForgeEditor({
 
   const commitShapes = useCallback(
     (next: WorkplaneShape[], nextSelection: string | string[] | null = selectedIds, message?: string) => {
-      const canonicalNext = next.map(canonicalizeShape);
+      const canonicalNext = refreshConstructionPlaneShapes(next.map(canonicalizeShape), shapesRef.current);
       const requestedSelection = Array.isArray(nextSelection) ? nextSelection : nextSelection ? [nextSelection] : [];
       const validSelection = requestedSelection.filter((id, index) => requestedSelection.indexOf(id) === index && canonicalNext.some((shape) => shape.id === id));
       shapesRef.current = canonicalNext;
@@ -5911,6 +6235,40 @@ export function SketchForgeEditor({
     },
     [appendHistorySnapshot, selectedIds, syncProjectShapes],
   );
+
+  const createPrincipalConstructionPlane = useCallback((principal: PrincipalPlane, offset: number) => {
+    const safeOffset = Number.isFinite(offset) ? Math.max(-1000, Math.min(1000, offset)) : 0;
+    const pose = principalPlanePose(principal, safeOffset);
+    const label = principal.toUpperCase();
+    const plane = createConstructionPlaneShape(
+      `${label} plane${Math.abs(safeOffset) > 0.0001 ? ` (${safeOffset} mm)` : ""}`,
+      { kind: "principal", principal, offset: safeOffset, pose },
+      workspaceSettings.width,
+      workspaceSettings.depth,
+    );
+    commitShapes([...shapes, plane], [], `${label} construction plane created and activated`);
+    setActiveConstructionPlaneId(plane.id);
+    setConstructionPlanePanelOpen(false);
+  }, [commitShapes, shapes, workspaceSettings.depth, workspaceSettings.width]);
+
+  const createFaceConstructionPlane = useCallback((input: { sourceShapeId: string; origin: [number, number, number]; normal: [number, number, number]; preferredXAxis: [number, number, number] }) => {
+    const source = shapes.find((shape) => shape.id === input.sourceShapeId && shape.kind !== "constructionPlane");
+    if (!source) {
+      setNotice("The selected face is no longer available");
+      return;
+    }
+    const pose = poseFromWorldOriginAndNormal(input.origin, input.normal, input.preferredXAxis);
+    const attachment = constructionPlaneAttachmentFromWorldPose(pose, source);
+    const plane = createConstructionPlaneShape(
+      `${source.name} face plane`,
+      { kind: "face", sourceShapeId: source.id, attachment, pose },
+      Math.max(20, Math.min(workspaceSettings.width, shapeWidth(source) * 1.6)),
+      Math.max(20, Math.min(workspaceSettings.depth, Math.max(source.height, shapeDepth(source)) * 1.6)),
+    );
+    commitShapes([...shapes, plane], source.id, `Associative plane created from ${source.name}`);
+    setActiveConstructionPlaneId(plane.id);
+    setWorkplaneMode(false);
+  }, [commitShapes, shapes, workspaceSettings.depth, workspaceSettings.width]);
 
   const removeEdgeTreatment = useCallback(async (optionId: string) => {
     if (!selectedShape) {
@@ -5968,8 +6326,9 @@ export function SketchForgeEditor({
     [],
   );
 
-  const beginSketch = useCallback((profile?: SketchProfile, editingId: string | null = null) => {
-    const initial = cloneSketchProfile(solveSketchProfile(profile ?? emptySketchProfile()).profile);
+  const beginSketch = useCallback((profile?: SketchProfile, editingId: string | null = null, constructionPlaneId = activeConstructionPlaneId) => {
+    const refreshed = profile ? refreshLinkedSketchProjections(profile, shapes, constructionPlaneId) : emptySketchProfile();
+    const initial = cloneSketchProfile(solveSketchProfile(refreshed).profile);
     setToolbarMode("sketch");
     setSketchActive(true);
     setSketchTool(profile?.segments.length ? "select" : "line");
@@ -5987,16 +6346,21 @@ export function SketchForgeEditor({
     setSketchRectDraft(null);
     setSketchPolygonDraft(null);
     setSketchTextDraft(null);
+    setSketchCommand(null);
+    setSketchConstructionPlaneId(constructionPlaneId);
     setEditingSketchShapeId(editingId);
-    setNotice(editingId ? "Editing sketch profile" : "Sketch started: place the first point");
-  }, []);
+    const planeName = constructionPlaneId === BASE_CONSTRUCTION_PLANE_ID
+      ? "base plane"
+      : constructionPlanes.find((plane) => plane.id === constructionPlaneId)?.name ?? "construction plane";
+    setNotice(editingId ? `Editing sketch on ${planeName}` : `Sketch started on ${planeName}: place the first point`);
+  }, [activeConstructionPlaneId, constructionPlanes, shapes]);
 
   const beginSketchEdit = useCallback(() => {
     if (selectedShapes.length !== 1 || !selectedShape?.sketchProfile) {
       setNotice("Select one shape created from a sketch to edit it");
       return;
     }
-    beginSketch(selectedShape.sketchProfile, selectedShape.id);
+    beginSketch(selectedShape.sketchProfile, selectedShape.id, selectedShape.sketchPlane?.constructionPlaneId ?? BASE_CONSTRUCTION_PLANE_ID);
   }, [beginSketch, selectedShape, selectedShapes.length]);
 
   const cancelSketch = useCallback(() => {
@@ -6009,6 +6373,7 @@ export function SketchForgeEditor({
     setSketchRectDraft(null);
     setSketchPolygonDraft(null);
     setSketchTextDraft(null);
+    setSketchCommand(null);
     setEditingSketchShapeId(null);
     setNotice("Sketch cancelled");
   }, []);
@@ -6425,6 +6790,17 @@ export function SketchForgeEditor({
     commitSketchProfile(result.profile, result.conflicts.length ? "Point moved with constraint conflicts" : "Sketch point moved");
   }, [commitSketchProfile, sketchProfile]);
 
+  const moveSketchDimension = useCallback((segmentId: string, offset: { x: number; z: number }) => {
+    if (!sketchProfile.segments.some((segment) => segment.id === segmentId)) return;
+    commitSketchProfile({
+      ...sketchProfile,
+      segments: sketchProfile.segments.map((segment) => segment.id === segmentId
+        ? { ...segment, dimensionLabelOffset: { ...offset } }
+        : segment),
+    }, "Dimension moved");
+    setSketchSelection({ kind: "segment", id: segmentId });
+  }, [commitSketchProfile, sketchProfile]);
+
   const toggleSketchPointFixed = useCallback((id: string) => {
     const fixed = (sketchProfile.constraints ?? []).some((constraint) => constraint.kind === "fixed" && constraint.pointId === id);
     const result = setSketchPointFixed(sketchProfile, id, !fixed, createLocalId);
@@ -6495,18 +6871,264 @@ export function SketchForgeEditor({
     setSketchTool("select");
   }, [commitSketchProfile, sketchProfile]);
 
+  const openSketchCommand = useCallback((command: SketchCommandKind) => {
+    if (command === "project") {
+      setSketchTool("select");
+      setSketchActivePointId(null);
+      setSketchCircleDraft(null);
+      setSketchRectDraft(null);
+      setSketchPolygonDraft(null);
+      setSketchTextDraft(null);
+      setSketchCommand(command);
+      return;
+    }
+    if (sketchTool !== "select") {
+      setNotice("Choose Select and select sketch geometry first");
+      return;
+    }
+    if (!sketchSelection) {
+      setNotice(command === "sweep" ? "Select one closed profile and one open path first" : "Select sketch geometry first");
+      return;
+    }
+    setSketchCommand(command);
+  }, [sketchSelection, sketchTool]);
+
+  const selectGeneratedSketchEntities = useCallback((selection: SketchTransformSelection) => {
+    setSketchSelection({ kind: "multiple", ...selection });
+    setSketchActivePointId(null);
+  }, []);
+
+  const applySketchProject = useCallback((options: SketchProjectCommandOptions) => {
+    const source = shapes.find((shape) => shape.id === options.sourceShapeId && shape.kind !== "constructionPlane" && shape.id !== editingSketchShapeId);
+    if (!source) {
+      setNotice("Choose an available sketch or shape to project");
+      return;
+    }
+    if (options.linked && (sketchProfile.projections ?? []).some((projection) => projection.sourceShapeId === source.id)) {
+      setNotice(`${source.name} is already linked to this sketch`);
+      return;
+    }
+    const projectionId = options.linked ? createLocalId("sketch-projection") : undefined;
+    let projected: SketchProjectionResult;
+    try {
+      projected = projectShapeToSketchPlane(
+        source,
+        shapes,
+        constructionPlanePoseById(sketchConstructionPlaneId, shapes),
+        projectionId,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The source could not be projected into this sketch");
+      return;
+    }
+    if (!projected.segments.length) {
+      setNotice(source.sketchProfile ? "The source sketch collapses in this projection" : "The shape does not intersect the active sketch plane");
+      return;
+    }
+    const next: SketchProfile = {
+      ...sketchProfile,
+      points: [...sketchProfile.points, ...projected.points],
+      segments: [...sketchProfile.segments, ...projected.segments],
+      projections: projectionId ? [
+        ...(sketchProfile.projections ?? []),
+        { id: projectionId, sourceShapeId: source.id, sourceName: source.name, sourceKind: source.sketchProfile ? "sketch" : "intersection" },
+      ] : sketchProfile.projections,
+    };
+    commitSketchProfile(next, `${options.linked ? "Linked" : "Copied"} projection from ${source.name}`);
+    if (options.linked) setSketchSelection(null);
+    else selectGeneratedSketchEntities({
+      pointIds: projected.points.map((point) => point.id),
+      segmentIds: projected.segments.map((segment) => segment.id),
+      imageIds: [],
+      textIds: [],
+    });
+    setSketchCommand(null);
+  }, [commitSketchProfile, editingSketchShapeId, selectGeneratedSketchEntities, shapes, sketchConstructionPlaneId, sketchProfile]);
+
+  const applySketchOffset = useCallback((options: SketchOffsetCommandOptions) => {
+    const source = sketchTransformSelection(sketchSelection);
+    if (!source.segmentIds.length) {
+      setNotice("Select at least one sketch segment to offset");
+      return;
+    }
+    let result: ReturnType<typeof offsetSketchSegments>;
+    try {
+      result = offsetSketchSegments(sketchProfile, source.segmentIds, options.distance, { includeConnected: options.includeConnected });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The selected sketch path cannot be offset");
+      return;
+    }
+    commitSketchProfile(result.profile, `Created ${options.distance} mm sketch offset`);
+    selectGeneratedSketchEntities({ pointIds: result.pointIds, segmentIds: result.segmentIds, imageIds: [], textIds: [] });
+    setSketchCommand(null);
+  }, [commitSketchProfile, selectGeneratedSketchEntities, sketchProfile, sketchSelection]);
+
+  const applySketchMirror = useCallback((options: SketchMirrorOptions) => {
+    let source = sketchTransformSelection(sketchSelection);
+    let lineStart = { x: 0, z: 0 };
+    let lineEnd = options.axis === "x" ? { x: 1, z: 0 } : { x: 0, z: 1 };
+    if (options.axis === "segment") {
+      const reference = sketchProfile.segments.find((segment) => segment.id === options.segmentId);
+      const start = reference ? sketchProfile.points.find((point) => point.id === reference.startId) : null;
+      const end = reference ? sketchProfile.points.find((point) => point.id === reference.endId) : null;
+      if (!reference || !start || !end) {
+        setNotice("Choose a selected line as the mirror axis");
+        return;
+      }
+      source = withoutSketchReferenceSegment(sketchProfile, source, reference.id);
+      lineStart = start;
+      lineEnd = end;
+    }
+    if (!hasSketchTransformSelection(source)) {
+      setNotice("Select geometry in addition to the mirror axis");
+      return;
+    }
+    const result = transformSketchSelection(sketchProfile, source, [reflectionTransform(lineStart, lineEnd)]);
+    commitSketchProfile(result.profile, "Mirrored sketch geometry");
+    selectGeneratedSketchEntities(result.selection);
+    setSketchCommand(null);
+  }, [commitSketchProfile, selectGeneratedSketchEntities, sketchProfile, sketchSelection]);
+
+  const applySketchRectangularPattern = useCallback((options: SketchRectangularPatternOptions) => {
+    const columns = Math.max(1, Math.min(20, Math.round(options.columns)));
+    const rows = Math.max(1, Math.min(20, Math.round(options.rows)));
+    if (columns * rows < 2) {
+      setNotice("A rectangular pattern needs at least two instances");
+      return;
+    }
+    let source = sketchTransformSelection(sketchSelection);
+    let columnX = 1;
+    let columnZ = 0;
+    if (options.segmentId) {
+      const reference = sketchProfile.segments.find((segment) => segment.id === options.segmentId);
+      const start = reference ? sketchProfile.points.find((point) => point.id === reference.startId) : null;
+      const end = reference ? sketchProfile.points.find((point) => point.id === reference.endId) : null;
+      if (!reference || !start || !end) {
+        setNotice("Choose a selected line for the pattern direction");
+        return;
+      }
+      const length = Math.hypot(end.x - start.x, end.z - start.z);
+      if (length < 0.0001) {
+        setNotice("The pattern direction line is too short");
+        return;
+      }
+      source = withoutSketchReferenceSegment(sketchProfile, source, reference.id);
+      columnX = (end.x - start.x) / length;
+      columnZ = (end.z - start.z) / length;
+    }
+    if (!hasSketchTransformSelection(source)) {
+      setNotice("Select geometry in addition to the direction line");
+      return;
+    }
+    const rowX = -columnZ;
+    const rowZ = columnX;
+    const transforms = [];
+    for (let row = 0; row < rows; row += 1) {
+      for (let column = 0; column < columns; column += 1) {
+        if (row === 0 && column === 0) continue;
+        transforms.push(translationTransform(
+          column * options.columnSpacing * columnX + row * options.rowSpacing * rowX,
+          column * options.columnSpacing * columnZ + row * options.rowSpacing * rowZ,
+        ));
+      }
+    }
+    const result = transformSketchSelection(sketchProfile, source, transforms);
+    commitSketchProfile(result.profile, `Created ${columns} × ${rows} rectangular pattern`);
+    selectGeneratedSketchEntities(result.selection);
+    setSketchCommand(null);
+  }, [commitSketchProfile, selectGeneratedSketchEntities, sketchProfile, sketchSelection]);
+
+  const applySketchCircularPattern = useCallback((options: SketchCircularPatternOptions) => {
+    const count = Math.max(2, Math.min(40, Math.round(options.count)));
+    const angle = Math.max(-360, Math.min(360, options.angle));
+    if (Math.abs(angle) < 0.001) {
+      setNotice("The circular pattern angle must be non-zero");
+      return;
+    }
+    let source = sketchTransformSelection(sketchSelection);
+    let center = { x: 0, z: 0 };
+    if (options.pointId) {
+      const point = sketchProfile.points.find((candidate) => candidate.id === options.pointId);
+      if (!point) {
+        setNotice("Choose a selected point as the pattern center");
+        return;
+      }
+      center = point;
+      source = { ...source, pointIds: source.pointIds.filter((id) => id !== point.id) };
+    }
+    if (!hasSketchTransformSelection(source)) {
+      setNotice("Select geometry in addition to the center point");
+      return;
+    }
+    const fullCircle = Math.abs(Math.abs(angle) - 360) < 0.001;
+    const step = (angle * Math.PI / 180) / (fullCircle ? count : count - 1);
+    const transforms = Array.from({ length: count - 1 }, (_, index) => rotationTransform(step * (index + 1), center));
+    const result = transformSketchSelection(sketchProfile, source, transforms);
+    commitSketchProfile(result.profile, `Created ${count}-instance circular pattern`);
+    selectGeneratedSketchEntities(result.selection);
+    setSketchCommand(null);
+  }, [commitSketchProfile, selectGeneratedSketchEntities, sketchProfile, sketchSelection]);
+
+  const createSketchSweep = useCallback(() => {
+    const source = sketchTransformSelection(sketchSelection);
+    const existing = editingSketchShapeId ? shapes.find((shape) => shape.id === editingSketchShapeId) ?? null : null;
+    setNotice("Building sketch sweep…");
+    let swept: WorkplaneShape;
+    try {
+      swept = shapeFromSketchSweep(sketchProfile, source.segmentIds, existing);
+      swept = sketchShapeWithPlanePose(swept, sketchConstructionPlaneId, constructionPlanePoseById(sketchConstructionPlaneId, shapes, existing?.sketchPlane?.pose), existing?.sketchPlane?.localCenter);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The selected geometry cannot be swept");
+      return;
+    }
+    const nextShapes = existing ? shapes.map((shape) => shape.id === existing.id ? swept : shape) : [...shapes, swept];
+    commitShapes(nextShapes, swept.id, existing ? "Sketch sweep updated" : "Sketch sweep created");
+    setSketchCommand(null);
+    setSketchActive(false);
+    setSketchActivePointId(null);
+    setSketchSelection(null);
+    setSketchCircleDraft(null);
+    setSketchRectDraft(null);
+    setSketchPolygonDraft(null);
+    setSketchTextDraft(null);
+    setEditingSketchShapeId(null);
+    setToolbarMode("geometry");
+  }, [commitShapes, editingSketchShapeId, shapes, sketchConstructionPlaneId, sketchProfile, sketchSelection]);
+
   const finishSketch = useCallback(async () => {
     const existing = editingSketchShapeId ? shapes.find((shape) => shape.id === editingSketchShapeId) ?? null : null;
+    const refreshedProfile = refreshLinkedSketchProjections(sketchProfile, shapes, sketchConstructionPlaneId);
+    if (existing?.sketchFeature?.kind === "sweep") {
+      setNotice("Rebuilding sketch sweep…");
+      let swept: WorkplaneShape;
+      try {
+        swept = shapeFromSketchSweep(
+          refreshedProfile,
+          [...existing.sketchFeature.sectionSegmentIds, ...existing.sketchFeature.pathSegmentIds],
+          existing,
+        );
+        swept = sketchShapeWithPlanePose(swept, sketchConstructionPlaneId, constructionPlanePoseById(sketchConstructionPlaneId, shapes, existing.sketchPlane?.pose), existing.sketchPlane?.localCenter);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "The sweep profile cannot be converted to 3D");
+        return;
+      }
+      commitShapes(shapes.map((shape) => shape.id === existing.id ? swept : shape), swept.id, "Sketch sweep updated");
+      setSketchActive(false);
+      setSketchCommand(null);
+      setEditingSketchShapeId(null);
+      setToolbarMode("geometry");
+      return;
+    }
     const height = existing?.height ?? 10;
     setNotice("Building exact sketch geometry…");
     let extruded: WorkplaneShape | null = null;
     let exact = true;
     try {
-      extruded = await cadShapeFromSketchProfile(sketchProfile, height, existing);
+      extruded = await cadShapeFromSketchProfile(refreshedProfile, height, existing);
     } catch (error) {
       exact = false;
       try {
-        extruded = await shapeFromSketchProfile(sketchProfile, height, existing);
+        extruded = await shapeFromSketchProfile(refreshedProfile, height, existing);
       } catch (fallbackError) {
         setNotice(fallbackError instanceof Error ? fallbackError.message : error instanceof Error ? error.message : "The sketch profile cannot be converted to 3D");
         return;
@@ -6516,6 +7138,7 @@ export function SketchForgeEditor({
       setNotice("Close at least one profile before finishing the sketch");
       return;
     }
+    extruded = sketchShapeWithPlanePose(extruded, sketchConstructionPlaneId, constructionPlanePoseById(sketchConstructionPlaneId, shapes, existing?.sketchPlane?.pose), existing?.sketchPlane?.localCenter);
     const nextShapes = existing ? shapes.map((shape) => (shape.id === existing.id ? extruded : shape)) : [...shapes, extruded];
     commitShapes(nextShapes, extruded.id, exact ? existing ? "Sketch updated with exact CAD geometry" : "Exact sketch created at 10 mm height" : existing ? "Sketch updated" : "Sketch created at 10 mm height");
     setSketchActive(false);
@@ -6523,9 +7146,10 @@ export function SketchForgeEditor({
     setSketchRectDraft(null);
     setSketchPolygonDraft(null);
     setSketchTextDraft(null);
+    setSketchCommand(null);
     setEditingSketchShapeId(null);
     setToolbarMode("geometry");
-  }, [commitShapes, editingSketchShapeId, shapes, sketchProfile]);
+  }, [commitShapes, editingSketchShapeId, shapes, sketchConstructionPlaneId, sketchProfile]);
 
   useEffect(() => {
     if (!projectId) {
@@ -6547,7 +7171,7 @@ export function SketchForgeEditor({
       setProjectAssets(nextAssets);
       setPlacementElevation(Number.isFinite(initialPlacementElevation) ? initialPlacementElevation : 0);
     }
-    const incoming = initialShapes.map(canonicalizeShape);
+    const incoming = refreshConstructionPlaneShapes(initialShapes.map(canonicalizeShape));
     const incomingSerialized = projectShapesFingerprint(incoming);
     // The parent echoes shapes after a local save; rehydrating that echo can reset active transform state.
     if (!projectChanged && lastProjectShapesEchoRef.current !== null && incomingSerialized === lastProjectShapesEchoRef.current) {
@@ -7365,11 +7989,9 @@ export function SketchForgeEditor({
   }, [commitShapes, hasSelection, placementElevation, selectedIds, shapes]);
 
   const activateWorkplaneTool = useCallback(() => {
-    setWorkplaneMode((active) => {
-      const next = !active;
-      setNotice(next ? "Workplane tool: click a shape top or empty grid" : "Workplane tool cancelled");
-      return next;
-    });
+    setConstructionPlanePanelOpen((open) => !open);
+    setWorkplaneMode(false);
+    setNotice("Choose a principal plane or create one from a model face");
   }, []);
 
   const setPlacementWorkplane = useCallback((elevation: number, source: "shape" | "base") => {
@@ -8071,7 +8693,7 @@ export function SketchForgeEditor({
 
   const exportDesign = useCallback((format: DirectExportFormat, exportName: string) => {
     const sourceShapes = hasSelection ? selectedShapes : shapes;
-    const exportable = sourceShapes.filter((shape) => !shape.hole);
+    const exportable = sourceShapes.filter((shape) => !shape.hole && shape.kind !== "constructionPlane");
     if (exportable.length === 0) {
       setNotice(hasSelection ? "Select at least one solid shape before exporting" : "Add a solid shape before exporting");
       return;
@@ -8116,7 +8738,7 @@ export function SketchForgeEditor({
     if (stepExporting) {
       return;
     }
-    const sourceShapes = hasSelection ? selectedShapes : shapes;
+    const sourceShapes = (hasSelection ? selectedShapes : shapes).filter((shape) => shape.kind !== "constructionPlane");
     if (sourceShapes.some((shape) => shape.hole) && !sourceShapes.some((shape) => !shape.hole)) {
       setNotice("Select at least one solid shape before exporting STEP");
       return;
@@ -8337,6 +8959,12 @@ export function SketchForgeEditor({
   );
 
   const selectShape = useCallback((id: string | string[] | null, mode: "replace" | "toggle" = "replace") => {
+    const activatedId = Array.isArray(id) ? id.at(-1) : id;
+    const activatedPlane = activatedId ? shapesRef.current.find((shape) => shape.id === activatedId && shape.kind === "constructionPlane") : null;
+    if (activatedPlane) {
+      setActiveConstructionPlaneId(activatedPlane.id);
+      setNotice(`${activatedPlane.name} is now the active sketch plane`);
+    }
     setSelectedIds((current) => {
       if (Array.isArray(id)) {
         const unique = id.filter((entry, index) => id.indexOf(entry) === index);
@@ -8599,6 +9227,9 @@ export function SketchForgeEditor({
         onSketchPolygonSidesChange={setSketchPolygonSides}
         sketchCanUndo={sketchHistoryIndex > 0}
         sketchCanRedo={sketchHistoryIndex < sketchHistory.length - 1}
+        sketchHasSelection={Boolean(sketchSelection) && sketchTool === "select"}
+        sketchHasSegmentSelection={sketchTool === "select" && sketchTransformSelection(sketchSelection).segmentIds.length > 0}
+        sketchCanProject={shapes.some((shape) => shape.kind !== "constructionPlane" && shape.id !== editingSketchShapeId)}
         canEditSketch={selectedShapes.length === 1 && Boolean(selectedShape?.sketchProfile)}
         onStartSketch={() => beginSketch()}
         onEditSketch={beginSketchEdit}
@@ -8614,6 +9245,12 @@ export function SketchForgeEditor({
         onSketchRedo={sketchRedo}
         onSketchFinish={finishSketch}
         onSketchCancel={cancelSketch}
+        onSketchSweep={() => openSketchCommand("sweep")}
+        onSketchProject={() => openSketchCommand("project")}
+        onSketchOffset={() => openSketchCommand("offset")}
+        onSketchMirror={() => openSketchCommand("mirror")}
+        onSketchRectangularPattern={() => openSketchCommand("rectangular-pattern")}
+        onSketchCircularPattern={() => openSketchCommand("circular-pattern")}
         onHome={onHome}
         onAlign={toggleAlignMode}
         onChamfer={() => edgeModifier?.kind === "chamfer" ? cancelEdgeModifier() : startEdgeModifier("chamfer")}
@@ -8636,7 +9273,7 @@ export function SketchForgeEditor({
         onUngroup={ungroupSelected}
         onUndo={undo}
         onWorkplaneTool={activateWorkplaneTool}
-        workplaneMode={workplaneMode}
+        workplaneMode={workplaneMode || constructionPlanePanelOpen}
         onTopPanel={(panel) => {
           setTopPanel((current) => (current === panel ? null : panel));
           setMenuOpen(false);
@@ -8649,9 +9286,10 @@ export function SketchForgeEditor({
       />
       <div className="editor-body">
         {toolbarMode === "sketch" && sketchActive ? (
-          <SketchWorkspace
+          <>
+            <SketchWorkspace
             profile={sketchProfile}
-            referenceShapes={shapes.filter((shape) => shape.id !== editingSketchShapeId)}
+            referenceShapes={sketchConstructionPlaneId === BASE_CONSTRUCTION_PLANE_ID ? shapes.filter((shape) => shape.id !== editingSketchShapeId && shape.kind !== "constructionPlane") : []}
             tool={sketchTool}
             activePointId={sketchActivePointId}
             selected={sketchSelection}
@@ -8663,6 +9301,7 @@ export function SketchForgeEditor({
             textDraft={sketchTextDraft}
             initialSnap={initialSnap}
             initialWorkspace={initialWorkspace}
+            planeName={sketchConstructionPlaneId === BASE_CONSTRUCTION_PLANE_ID ? "Base XZ plane" : constructionPlanes.find((plane) => plane.id === sketchConstructionPlaneId)?.name ?? "Construction plane"}
             onPlanePoint={addSketchPlanePoint}
             onPointPress={pressSketchPoint}
             onSelectSegment={(id) => {
@@ -8691,6 +9330,7 @@ export function SketchForgeEditor({
             onDeleteSegment={deleteSketchSegment}
             onMovePoint={moveSketchPoint}
             onMoveHandle={moveSketchHandle}
+            onMoveDimension={moveSketchDimension}
             onInsertPoint={insertSketchPoint}
             onSetPointMode={setSketchPointMode}
             onTogglePointFixed={toggleSketchPointFixed}
@@ -8719,7 +9359,24 @@ export function SketchForgeEditor({
               setSketchTextDraft(null);
               setNotice("Text cancelled");
             }}
-          />
+            />
+            {sketchCommand ? (
+              <SketchOperationPanel
+                key={sketchCommand}
+                command={sketchCommand}
+                profile={sketchProfile}
+                selection={sketchSelection}
+                projectionSources={shapes.filter((shape) => shape.kind !== "constructionPlane" && shape.id !== editingSketchShapeId)}
+                onProject={applySketchProject}
+                onOffset={applySketchOffset}
+                onMirror={applySketchMirror}
+                onRectangularPattern={applySketchRectangularPattern}
+                onCircularPattern={applySketchCircularPattern}
+                onSweep={createSketchSweep}
+                onClose={() => setSketchCommand(null)}
+              />
+            ) : null}
+          </>
         ) : (
           <WorkplaneViewport
             theme={activeTheme}
@@ -8747,6 +9404,7 @@ export function SketchForgeEditor({
           onMirrorSelection={mirrorSelectionAcross}
           onSelectShape={selectShape}
           onSetPlacementElevation={setPlacementWorkplane}
+          onCreateFaceConstructionPlane={createFaceConstructionPlane}
           onInteractionActiveChange={updateProjectInteractionActive}
           onEditSketch={beginSketchEdit}
           canSeparateParts={canSeparateSelectedParts}
@@ -8761,6 +9419,28 @@ export function SketchForgeEditor({
           onModifierEdgeToggle={toggleModifierEdge}
           />
         )}
+        {toolbarMode === "geometry" && constructionPlanePanelOpen ? (
+          <ConstructionPlanePanel
+            planes={constructionPlanes}
+            activeId={activeConstructionPlaneId}
+            onCreatePrincipal={createPrincipalConstructionPlane}
+            onPickFace={() => {
+              setConstructionPlanePanelOpen(false);
+              setWorkplaneMode(true);
+              setNotice("Click a planar model face to create an associative construction plane");
+            }}
+            onActivate={(id) => {
+              setActiveConstructionPlaneId(id);
+              setSelectedIds([]);
+              if (id === BASE_CONSTRUCTION_PLANE_ID) {
+                setNotice("Base XZ plane is now active for sketches");
+              } else {
+                setNotice(`${constructionPlanes.find((plane) => plane.id === id)?.name ?? "Construction plane"} is now active for sketches`);
+              }
+            }}
+            onClose={() => setConstructionPlanePanelOpen(false)}
+          />
+        ) : null}
       </div>
       {edgeModifier ? (
         <EdgeModifierPanel
@@ -8908,6 +9588,194 @@ function SketchReferenceIcon({ name }: { name: SketchReferenceIconName }) {
   );
 }
 
+function ConstructionPlanePanel({
+  planes,
+  activeId,
+  onCreatePrincipal,
+  onPickFace,
+  onActivate,
+  onClose,
+}: {
+  planes: WorkplaneShape[];
+  activeId: string;
+  onCreatePrincipal: (principal: PrincipalPlane, offset: number) => void;
+  onPickFace: () => void;
+  onActivate: (id: string) => void;
+  onClose: () => void;
+}) {
+  const [principal, setPrincipal] = useState<PrincipalPlane>("xz");
+  const [offset, setOffset] = useState(0);
+  return (
+    <aside className="construction-plane-panel" aria-label="Construction planes" onPointerDown={(event) => event.stopPropagation()}>
+      <div className="sketch-operation-header">
+        <strong>Construction planes</strong>
+        <button type="button" aria-label="Close construction planes" onClick={onClose}><X size={16} /></button>
+      </div>
+      <div className="construction-plane-active">
+        <span>Active sketch plane</span>
+        <button className={activeId === BASE_CONSTRUCTION_PLANE_ID ? "active" : ""} type="button" onClick={() => onActivate(BASE_CONSTRUCTION_PLANE_ID)}>Base XZ plane</button>
+        {planes.map((plane) => (
+          <button className={activeId === plane.id ? "active" : ""} key={plane.id} type="button" onClick={() => onActivate(plane.id)}>{plane.name}</button>
+        ))}
+      </div>
+      <div className="construction-plane-create">
+        <label>Principal plane<select value={principal} onChange={(event) => setPrincipal(event.target.value as PrincipalPlane)}>
+          <option value="xz">XZ (top)</option>
+          <option value="xy">XY (front)</option>
+          <option value="yz">YZ (side)</option>
+        </select></label>
+        <label>Normal offset<input type="number" step="0.1" value={offset} onChange={(event) => setOffset(event.currentTarget.valueAsNumber || 0)} /></label>
+        <button className="primary" type="button" onClick={() => onCreatePrincipal(principal, offset)}>Create offset plane</button>
+      </div>
+      <div className="construction-plane-face">
+        <span>Associative face plane</span>
+        <button type="button" onClick={onPickFace}>Pick a planar model face</button>
+        <small>The plane follows the source object when it moves, rotates, or resizes.</small>
+      </div>
+    </aside>
+  );
+}
+
+function SketchOperationPanel({
+  command,
+  profile,
+  selection,
+  projectionSources,
+  onProject,
+  onOffset,
+  onMirror,
+  onRectangularPattern,
+  onCircularPattern,
+  onSweep,
+  onClose,
+}: {
+  command: SketchCommandKind;
+  profile: SketchProfile;
+  selection: SketchSelection;
+  projectionSources: WorkplaneShape[];
+  onProject: (options: SketchProjectCommandOptions) => void;
+  onOffset: (options: SketchOffsetCommandOptions) => void;
+  onMirror: (options: SketchMirrorOptions) => void;
+  onRectangularPattern: (options: SketchRectangularPatternOptions) => void;
+  onCircularPattern: (options: SketchCircularPatternOptions) => void;
+  onSweep: () => void;
+  onClose: () => void;
+}) {
+  const selected = sketchTransformSelection(selection);
+  const selectedSegments = profile.segments.filter((segment) => selected.segmentIds.includes(segment.id));
+  const selectedPoints = profile.points.filter((point) => selected.pointIds.includes(point.id));
+  const [mirrorAxis, setMirrorAxis] = useState<"x" | "z" | "segment">("x");
+  const [mirrorSegmentId, setMirrorSegmentId] = useState(selectedSegments[0]?.id ?? "");
+  const [columns, setColumns] = useState(2);
+  const [rows, setRows] = useState(1);
+  const [columnSpacing, setColumnSpacing] = useState(10);
+  const [rowSpacing, setRowSpacing] = useState(10);
+  const [directionSegmentId, setDirectionSegmentId] = useState("");
+  const [circularCount, setCircularCount] = useState(4);
+  const [circularAngle, setCircularAngle] = useState(360);
+  const [centerPointId, setCenterPointId] = useState("");
+  const [offsetDistance, setOffsetDistance] = useState(2);
+  const [offsetConnected, setOffsetConnected] = useState(true);
+  const [projectionSourceId, setProjectionSourceId] = useState(projectionSources[0]?.id ?? "");
+  const [projectionLinked, setProjectionLinked] = useState(true);
+  const title = command === "sweep"
+    ? "Sweep"
+    : command === "project"
+      ? "Project geometry"
+      : command === "offset"
+        ? "Offset"
+        : command === "mirror"
+          ? "Mirror"
+          : command === "rectangular-pattern"
+            ? "Rectangular pattern"
+            : "Circular pattern";
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (command === "sweep") onSweep();
+    else if (command === "project") onProject({ sourceShapeId: projectionSourceId, linked: projectionLinked });
+    else if (command === "offset") onOffset({ distance: offsetDistance, includeConnected: offsetConnected });
+    else if (command === "mirror") onMirror({ axis: mirrorAxis, segmentId: mirrorAxis === "segment" ? mirrorSegmentId : undefined });
+    else if (command === "rectangular-pattern") onRectangularPattern({ columns, rows, columnSpacing, rowSpacing, segmentId: directionSegmentId || undefined });
+    else onCircularPattern({ count: circularCount, angle: circularAngle, pointId: centerPointId || undefined });
+  };
+
+  return (
+    <form className="sketch-operation-panel" aria-label={title} onSubmit={submit} onPointerDown={(event) => event.stopPropagation()}>
+      <div className="sketch-operation-header">
+        <strong>{title}</strong>
+        <button type="button" aria-label={`Close ${title}`} onClick={onClose}><X size={16} /></button>
+      </div>
+      {command === "sweep" ? (
+        <div className="sketch-operation-copy">
+          <p>Create a 3D body from one selected closed profile and one selected open path.</p>
+          <span>{selected.segmentIds.length} selected segments</span>
+        </div>
+      ) : null}
+      {command === "project" ? (
+        <div className="sketch-offset-fields">
+          <label>Source<select value={projectionSourceId} onChange={(event) => setProjectionSourceId(event.target.value)}>
+            {projectionSources.map((shape) => <option key={shape.id} value={shape.id}>{shape.sketchProfile ? "Sketch" : "Shape"}: {shape.name}</option>)}
+          </select></label>
+          <label>Result<select value={projectionLinked ? "linked" : "editable"} onChange={(event) => setProjectionLinked(event.target.value === "linked")}>
+            <option value="linked">Linked reference</option>
+            <option value="editable">Editable copy</option>
+          </select></label>
+          <p>{projectionLinked ? "Linked geometry is fixed and refreshes from its source when the sketch is opened or rebuilt." : "Editable geometry is copied once and can be changed independently."}</p>
+        </div>
+      ) : null}
+      {command === "offset" ? (
+        <div className="sketch-offset-fields">
+          <label>Distance<input type="number" step="0.1" value={offsetDistance} onChange={(event) => setOffsetDistance(event.currentTarget.valueAsNumber || 0)} /></label>
+          <label className="sketch-operation-checkbox"><input type="checkbox" checked={offsetConnected} onChange={(event) => setOffsetConnected(event.currentTarget.checked)} /><span>Include connected path</span></label>
+          <p>Positive offsets closed paths outward and open paths to the left. Use a negative distance for the opposite side.</p>
+        </div>
+      ) : null}
+      {command === "mirror" ? (
+        <label>
+          Mirror axis
+          <select value={mirrorAxis === "segment" ? `segment:${mirrorSegmentId}` : mirrorAxis} onChange={(event) => {
+            if (event.target.value.startsWith("segment:")) {
+              setMirrorAxis("segment");
+              setMirrorSegmentId(event.target.value.slice(8));
+            } else setMirrorAxis(event.target.value as "x" | "z");
+          }}>
+            <option value="x">Origin X axis</option>
+            <option value="z">Origin Z axis</option>
+            {selectedSegments.map((segment, index) => <option key={segment.id} value={`segment:${segment.id}`}>Selected segment {index + 1}</option>)}
+          </select>
+        </label>
+      ) : null}
+      {command === "rectangular-pattern" ? (
+        <div className="sketch-operation-fields">
+          <label>Columns<input type="number" min={1} max={20} step={1} value={columns} onChange={(event) => setColumns(event.currentTarget.valueAsNumber || 1)} /></label>
+          <label>Rows<input type="number" min={1} max={20} step={1} value={rows} onChange={(event) => setRows(event.currentTarget.valueAsNumber || 1)} /></label>
+          <label>Column spacing<input type="number" step="0.1" value={columnSpacing} onChange={(event) => setColumnSpacing(event.currentTarget.valueAsNumber || 0)} /></label>
+          <label>Row spacing<input type="number" step="0.1" value={rowSpacing} onChange={(event) => setRowSpacing(event.currentTarget.valueAsNumber || 0)} /></label>
+          <label className="wide">Direction<select value={directionSegmentId} onChange={(event) => setDirectionSegmentId(event.target.value)}>
+            <option value="">Global X / Z</option>
+            {selectedSegments.map((segment, index) => <option key={segment.id} value={segment.id}>Selected segment {index + 1}</option>)}
+          </select></label>
+        </div>
+      ) : null}
+      {command === "circular-pattern" ? (
+        <div className="sketch-operation-fields">
+          <label>Instances<input type="number" min={2} max={40} step={1} value={circularCount} onChange={(event) => setCircularCount(event.currentTarget.valueAsNumber || 2)} /></label>
+          <label>Total angle<input type="number" min={-360} max={360} step="1" value={circularAngle} onChange={(event) => setCircularAngle(event.currentTarget.valueAsNumber || 0)} /></label>
+          <label className="wide">Center<select value={centerPointId} onChange={(event) => setCenterPointId(event.target.value)}>
+            <option value="">Sketch origin</option>
+            {selectedPoints.map((point, index) => <option key={point.id} value={point.id}>Selected point {index + 1}</option>)}
+          </select></label>
+        </div>
+      ) : null}
+      <div className="sketch-operation-actions">
+        <button type="button" onClick={onClose}>Cancel</button>
+        <button className="primary" type="submit" disabled={command === "project" && !projectionSourceId}>{command === "sweep" ? "Create sweep" : command === "project" ? "Project" : "Apply"}</button>
+      </div>
+    </form>
+  );
+}
+
 function SecondaryToolbar({
   toolbarMode,
   onToolbarModeChange,
@@ -8929,6 +9797,9 @@ function SecondaryToolbar({
   onSketchPolygonSidesChange,
   sketchCanUndo,
   sketchCanRedo,
+  sketchHasSelection,
+  sketchHasSegmentSelection,
+  sketchCanProject,
   canEditSketch,
   onStartSketch,
   onEditSketch,
@@ -8938,6 +9809,12 @@ function SecondaryToolbar({
   onSketchRedo,
   onSketchFinish,
   onSketchCancel,
+  onSketchSweep,
+  onSketchProject,
+  onSketchOffset,
+  onSketchMirror,
+  onSketchRectangularPattern,
+  onSketchCircularPattern,
   onHome,
   onAlign,
   onChamfer,
@@ -8981,6 +9858,9 @@ function SecondaryToolbar({
   onSketchPolygonSidesChange: (sides: number) => void;
   sketchCanUndo: boolean;
   sketchCanRedo: boolean;
+  sketchHasSelection: boolean;
+  sketchHasSegmentSelection: boolean;
+  sketchCanProject: boolean;
   canEditSketch: boolean;
   onStartSketch: () => void;
   onEditSketch: () => void;
@@ -8990,6 +9870,12 @@ function SecondaryToolbar({
   onSketchRedo: () => void;
   onSketchFinish: () => void;
   onSketchCancel: () => void;
+  onSketchSweep: () => void;
+  onSketchProject: () => void;
+  onSketchOffset: () => void;
+  onSketchMirror: () => void;
+  onSketchRectangularPattern: () => void;
+  onSketchCircularPattern: () => void;
   onHome?: () => void;
   onAlign: () => void;
   onChamfer: () => void;
@@ -9274,6 +10160,29 @@ function SecondaryToolbar({
                     </button>
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "erase" ? "active" : ""}`} type="button" aria-label="Erase" title="Erase" onClick={() => onSketchTool("erase")}>
                       <SketchReferenceIcon name="erase" />
+                    </button>
+                  </div>
+                </div>
+                <div className="toolbar-section sketch-transform-section">
+                  <div className="toolbar-section-label">Create / Transform</div>
+                  <div className="toolbar-section-tools">
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchCanProject ? "" : "disabled"}`} type="button" aria-label="Project previous sketch or shape" title="Project" onClick={onSketchProject} disabled={!sketchCanProject}>
+                      <ScanLine aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchHasSelection ? "" : "disabled"}`} type="button" aria-label="Sweep" title="Sweep selected profile along selected path" onClick={onSketchSweep} disabled={!sketchHasSelection}>
+                      <Route aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchHasSegmentSelection ? "" : "disabled"}`} type="button" aria-label="Offset sketch path" title="Offset" onClick={onSketchOffset} disabled={!sketchHasSegmentSelection}>
+                      <CopyPlus aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchHasSelection ? "" : "disabled"}`} type="button" aria-label="Mirror sketch geometry" title="Mirror" onClick={onSketchMirror} disabled={!sketchHasSelection}>
+                      <ToolbarMirrorIcon />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchHasSelection ? "" : "disabled"}`} type="button" aria-label="Rectangular pattern" title="Rectangular pattern" onClick={onSketchRectangularPattern} disabled={!sketchHasSelection}>
+                      <Grid2X2 aria-hidden="true" />
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchHasSelection ? "" : "disabled"}`} type="button" aria-label="Circular pattern" title="Circular pattern" onClick={onSketchCircularPattern} disabled={!sketchHasSelection}>
+                      <RotateCw aria-hidden="true" />
                     </button>
                   </div>
                 </div>
