@@ -89,7 +89,7 @@ import { cloneWorkplaneShapeSnapshot, compactEdgeTreatmentHistory, edgeTreatment
 import { appendEditorHistorySnapshot, boundedEditorHistoryState, editorHistoryEntry, editorHistoryForExport, hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry, type EditorHistoryExportLimit, type EditorHistoryState } from "@/lib/editorHistory";
 import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
 import type { SculptBrushKind } from "@/lib/sculptBrush";
-import { shapeWithFeatureToggles, withShapeFeatureEnabled } from "@/lib/shapeFeatureToggles";
+import { removeShapeFeature, shapeWithFeatureToggles, withShapeFeatureEnabled } from "@/lib/shapeFeatureToggles";
 import { createLocalId } from "@/lib/localIds";
 import { unionSplitManifoldComponents } from "@/lib/manifoldSplit";
 import { modelSplitPlane, splitPlaneIntersectsPoints, splitShapeFromWorldPositions, type ModelSplitPlane } from "@/lib/modelSplit";
@@ -8350,6 +8350,59 @@ export function SketchForgeEditor({
     );
   }, [commitShapes, selectedIds, shapes]);
 
+  const deleteShapeFeature = useCallback((id: string, kind: ShapeFeatureKind) => {
+    const target = shapesRef.current.find((shape) => shape.id === id);
+    if (!target) return;
+    if (target.locked) {
+      setNotice("Unlock the shape before deleting a feature");
+      return;
+    }
+    const removal = removeShapeFeature(target, kind);
+    if (!removal) {
+      setNotice("This feature can no longer be removed");
+      return;
+    }
+
+    const label = kind === "edge"
+      ? (target.edgeTreatmentHistory?.length ?? 0) > 1 ? "all fillet / chamfer features" : "Fillet / chamfer"
+      : kind === "sculpt"
+        ? "Sculpt changes"
+        : kind === "sketch"
+          ? "Sketch output"
+          : target.groupOperation === "intersection" ? "Intersection" : "Group result";
+    const remainingSelection = selectedIdsRef.current.filter((selectedId) => selectedId !== id);
+    if (kind === "edge") invalidateCadModifierSession();
+    if (kind === "sculpt") {
+      setSculptSession((current) => current?.targetId === id ? null : current);
+    }
+
+    if (removal.type === "replace") {
+      commitShapes(
+        shapesRef.current.map((shape) => shape.id === id ? removal.shape : shape),
+        selectedIdsRef.current,
+        `Deleted ${label} from ${target.name}`,
+      );
+    } else if (removal.type === "delete-shape") {
+      commitShapes(
+        shapesRef.current.filter((shape) => shape.id !== id),
+        remainingSelection,
+        `Deleted ${label} and ${target.name}`,
+      );
+    } else {
+      const restored = restoreGroupedChildren(target);
+      if (restored.length === 0) {
+        setNotice("The grouped operands could not be restored");
+        return;
+      }
+      commitShapes(
+        shapesRef.current.flatMap((shape) => shape.id === id ? restored : [shape]),
+        [...remainingSelection, ...restored.map((shape) => shape.id)],
+        `Deleted ${label} from ${target.name}`,
+      );
+    }
+    setNotice(`${label} deleted from ${target.name}`);
+  }, [commitShapes, invalidateCadModifierSession]);
+
   const duplicateSelected = useCallback(() => {
     if (!hasSelection) {
       setNotice("Select a shape first");
@@ -10716,6 +10769,7 @@ export function SketchForgeEditor({
           onSetHidden={setShapeHidden}
           onSetState={setShapeState}
           onSetFeatureEnabled={setShapeFeatureEnabled}
+          onDeleteFeature={deleteShapeFeature}
           onDelete={deleteShapesById}
           onGroup={() => void groupSelected()}
           onUngroup={ungroupSelected}

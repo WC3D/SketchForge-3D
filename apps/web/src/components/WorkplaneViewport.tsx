@@ -30,7 +30,8 @@ import { cadModifierPrimitiveForBakedShape, cadTransformFromMatrix, cadTransform
 import { createGearGeometry } from "@/lib/gearGeometry";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import type { ModelSplitPlane } from "@/lib/modelSplit";
-import { sculptMeshAtPoint, type SculptBrushSettings } from "@/lib/sculptBrush";
+import { sculptMeshAtPoint, type SculptBrushSettings, type SculptPoint } from "@/lib/sculptBrush";
+import { sculptBrushRing } from "@/lib/sculptCursor";
 import { createMoveDimensionOverlay, type MoveDimensionAxis, type MoveDimensionOverlayData } from "@/lib/moveDimensionLines";
 import {
   horizontalPlacementWorkplane,
@@ -410,6 +411,15 @@ type RotationHandleSide = "near" | "right" | "far" | "left";
 type RotationHandleSides = Record<RotationAxis, RotationHandleSide>;
 type ShapeUpdatePatch = Partial<WorkplaneShape> & { bakeTransform?: boolean };
 type SculptDragState = { pointerId: number; targetId: string };
+type SculptCursorSurface = { center: THREE.Vector3; ringOffsets: THREE.Vector3[] };
+type SculptCursorSource = { clientX: number; clientY: number; surface?: SculptCursorSurface };
+type SculptCursorOverlayState = {
+  kind: SculptBrushSettings["kind"];
+  centerX: number;
+  centerY: number;
+  ringPoints: string | null;
+};
+type SculptPick = { point: SculptPoint; surface: SculptCursorSurface };
 type ResizeSigns = { x: number; z: number };
 type ResizeAnchorMemory = {
   shapeId: string;
@@ -667,6 +677,54 @@ function projectToScreen(point: THREE.Vector3, state: ThreeState) {
     x: ((projected.x + 1) / 2) * rect.width,
     y: ((1 - projected.y) / 2) * rect.height,
   };
+}
+
+function syncSculptCursorOverlay(
+  state: ThreeState,
+  source: SculptCursorSource | null,
+  settings: SculptBrushSettings | null | undefined,
+  overlayRef: MutableRefObject<SculptCursorOverlayState | null>,
+  setOverlay: Dispatch<SetStateAction<SculptCursorOverlayState | null>>,
+) {
+  let next: SculptCursorOverlayState | null = null;
+  if (source && settings) {
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    const rounded = (value: number) => Math.round(value * 10) / 10;
+    if (source.surface) {
+      const surface = source.surface;
+      state.camera.updateMatrixWorld();
+      const project = (point: THREE.Vector3) => {
+        const projected = point.clone().project(state.camera);
+        return {
+          x: rounded((projected.x + 1) / 2 * rect.width),
+          y: rounded((1 - projected.y) / 2 * rect.height),
+        };
+      };
+      const center = project(surface.center);
+      const ringPoints = surface.ringOffsets.map((offset) => {
+        const point = project(surface.center.clone().addScaledVector(offset, settings.radius));
+        return `${point.x},${point.y}`;
+      }).join(" ");
+      next = { kind: settings.kind, centerX: center.x, centerY: center.y, ringPoints };
+    } else {
+      next = {
+        kind: settings.kind,
+        centerX: rounded(source.clientX - rect.left),
+        centerY: rounded(source.clientY - rect.top),
+        ringPoints: null,
+      };
+    }
+  }
+
+  const previous = overlayRef.current;
+  if (previous?.kind === next?.kind
+    && previous?.centerX === next?.centerX
+    && previous?.centerY === next?.centerY
+    && previous?.ringPoints === next?.ringPoints) {
+    return;
+  }
+  overlayRef.current = next;
+  setOverlay(next);
 }
 
 function syncMoveDimensionOverlay(
@@ -1385,6 +1443,27 @@ function syncRulerOverlay(
     overlayRef.current = next;
     setOverlay(next);
   }
+}
+
+function SculptCursorOverlay({ cursor }: { cursor: SculptCursorOverlayState }) {
+  const glyph = cursor.kind === "add" ? "+" : cursor.kind === "subtract" ? "-" : "~";
+  return (
+    <svg className={`sculpt-brush-cursor ${cursor.kind} ${cursor.ringPoints ? "on-surface" : "off-surface"}`} width="100%" height="100%" aria-hidden="true">
+      {cursor.ringPoints ? (
+        <>
+          <polygon className="sculpt-brush-ring-outline" points={cursor.ringPoints} />
+          <polygon className="sculpt-brush-ring" points={cursor.ringPoints} />
+        </>
+      ) : (
+        <>
+          <circle className="sculpt-brush-ring-outline" cx={cursor.centerX} cy={cursor.centerY} r="15" />
+          <circle className="sculpt-brush-ring" cx={cursor.centerX} cy={cursor.centerY} r="15" />
+        </>
+      )}
+      <circle className="sculpt-brush-center" cx={cursor.centerX} cy={cursor.centerY} r="8" />
+      <text className="sculpt-brush-glyph" x={cursor.centerX} y={cursor.centerY}>{glyph}</text>
+    </svg>
+  );
 }
 
 function RulerOverlay({
@@ -2293,6 +2372,7 @@ export function WorkplaneViewport({
     [selectedIds, shapes],
   );
   const [moveDimensionOverlay, setMoveDimensionOverlay] = useState<MoveDimensionOverlayState | null>(null);
+  const [sculptCursorOverlay, setSculptCursorOverlay] = useState<SculptCursorOverlayState | null>(null);
   const [moveDimensionsEnabled, setMoveDimensionsEnabled] = useState(true);
   const [challengeTutorialCollapsed, setChallengeTutorialCollapsed] = useState(false);
 
@@ -2314,6 +2394,8 @@ export function WorkplaneViewport({
   const transformRef = useRef<TransformDragState | null>(null);
   const sculptDragRef = useRef<SculptDragState | null>(null);
   const sculptSettingsRef = useRef(sculptSettings);
+  const sculptCursorSourceRef = useRef<SculptCursorSource | null>(null);
+  const sculptCursorOverlayRef = useRef<SculptCursorOverlayState | null>(null);
   const lastResizeAnchorRef = useRef<ResizeAnchorMemory | null>(null);
   const suppressNextLiftEditRef = useRef(false);
   const snapRef = useRef(snap);
@@ -2359,6 +2441,13 @@ export function WorkplaneViewport({
   });
 
   const selectedShape = useMemo(() => (interactiveSelectedIds.length === 1 ? shapes.find((shape) => shape.id === interactiveSelectedIds[0]) ?? null : null), [interactiveSelectedIds, shapes]);
+  const clearSculptCursor = useCallback(() => {
+    sculptCursorSourceRef.current = null;
+    if (sculptCursorOverlayRef.current) {
+      sculptCursorOverlayRef.current = null;
+      setSculptCursorOverlay(null);
+    }
+  }, []);
   const renderSelectionIds = useCallback(
     (ids = selectedIdsRef.current) => (
       workplaneModeRef.current || splitActiveRef.current || (modifierActiveRef.current && !modifierPreviewActiveRef.current) ? [] : ids
@@ -2772,6 +2861,18 @@ export function WorkplaneViewport({
     }
   }, [rulerModel]);
 
+  useEffect(() => {
+    if (!sculptSettings) {
+      clearSculptCursor();
+      return;
+    }
+    const state = threeRef.current;
+    if (state && sculptCursorSourceRef.current) {
+      syncSculptCursorOverlay(state, sculptCursorSourceRef.current, sculptSettings, sculptCursorOverlayRef, setSculptCursorOverlay);
+      state.needsRender = true;
+    }
+  }, [clearSculptCursor, sculptSettings]);
+
   useLayoutEffect(() => {
     const state = threeRef.current;
     rebuildShapes(
@@ -2841,8 +2942,8 @@ export function WorkplaneViewport({
   }, [placementWorkplane, resolvedTheme, workspace]);
 
   useEffect(() => {
-    setSelectionHelpersVisible(threeRef.current, !workplaneMode && activeTransformKind !== "rotate");
-  }, [activeTransformKind, workplaneMode]);
+    setSelectionHelpersVisible(threeRef.current, !workplaneMode && !sculptSettings && activeTransformKind !== "rotate");
+  }, [activeTransformKind, sculptSettings, workplaneMode]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -2927,6 +3028,13 @@ export function WorkplaneViewport({
           setMoveDimensionOverlay,
           workspaceRef.current.accuracy,
           resolvedThemeRef.current,
+        );
+        syncSculptCursorOverlay(
+          state,
+          sculptCursorSourceRef.current,
+          sculptSettingsRef.current,
+          sculptCursorOverlayRef,
+          setSculptCursorOverlay,
         );
         state.lastOverlaySync = now;
       }
@@ -3932,7 +4040,7 @@ export function WorkplaneViewport({
     return nearestId;
   }, []);
 
-  const pickSculptPoint = useCallback((clientX: number, clientY: number, targetId: string) => {
+  const pickSculptHit = useCallback((clientX: number, clientY: number, targetId: string): SculptPick | null => {
     const state = threeRef.current;
     if (!state) return null;
     const rect = state.renderer.domElement.getBoundingClientRect();
@@ -3943,10 +4051,25 @@ export function WorkplaneViewport({
     const hit = state.raycaster.intersectObjects(state.shapeLayer.children, true).find((entry) => (
       entry.object instanceof THREE.Mesh && entry.object.userData.shapeId === targetId
     ));
-    if (!hit || !(hit.object instanceof THREE.Mesh)) return null;
+    if (!hit?.face || !(hit.object instanceof THREE.Mesh)) return null;
     hit.object.updateWorldMatrix(true, false);
     const local = hit.object.worldToLocal(hit.point.clone());
-    return { x: local.x, y: local.y, z: local.z };
+    const point = { x: local.x, y: local.y, z: local.z };
+    const matrixWorld = hit.object.matrixWorld.clone();
+    const center = local.clone().applyMatrix4(matrixWorld);
+    const ringOffsets = sculptBrushRing(point, hit.face.normal, 1).map((ringPoint) => (
+      new THREE.Vector3(ringPoint.x, ringPoint.y, ringPoint.z).applyMatrix4(matrixWorld).sub(center)
+    ));
+    return { point, surface: { center, ringOffsets } };
+  }, []);
+
+  const updateSculptCursor = useCallback((clientX: number, clientY: number, pick: SculptPick | null) => {
+    const state = threeRef.current;
+    const settings = sculptSettingsRef.current;
+    if (!state || !settings) return;
+    const source: SculptCursorSource = { clientX, clientY, surface: pick?.surface };
+    sculptCursorSourceRef.current = source;
+    syncSculptCursorOverlay(state, source, settings, sculptCursorOverlayRef, setSculptCursorOverlay);
   }, []);
 
   const pickPlacementSurface = useCallback((clientX: number, clientY: number, reverse: boolean) => {
@@ -4081,11 +4204,12 @@ export function WorkplaneViewport({
       const sculptTargetId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
       if (activeSculpt && sculptTargetId) {
         event.preventDefault();
-        const point = pickSculptPoint(event.clientX, event.clientY, sculptTargetId);
-        if (!point) return;
+        const pick = pickSculptHit(event.clientX, event.clientY, sculptTargetId);
+        updateSculptCursor(event.clientX, event.clientY, pick);
+        if (!pick) return;
         const shape = shapesRef.current.find((entry) => entry.id === sculptTargetId);
         if (!shape?.importedMesh || shape.locked) return;
-        const patch = sculptMeshAtPoint(shape, point, activeSculpt);
+        const patch = sculptMeshAtPoint(shape, pick.point, activeSculpt);
         if (!patch) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         sculptDragRef.current = { pointerId: event.pointerId, targetId: sculptTargetId };
@@ -4391,7 +4515,7 @@ export function WorkplaneViewport({
       onSetPlacementWorkplane,
       onWorkplaneModeChange,
       pickPlacementSurface,
-      pickSculptPoint,
+      pickSculptHit,
       pickModifierEdge,
       pickShape,
       pickTransformHandle,
@@ -4403,6 +4527,7 @@ export function WorkplaneViewport({
       toPlacementWorkplanePoint,
       toRawPlanePoint,
       onUpdateShape,
+      updateSculptCursor,
     ],
   );
 
@@ -4410,11 +4535,13 @@ export function WorkplaneViewport({
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const sculptDrag = sculptDragRef.current;
       const activeSculpt = sculptSettingsRef.current;
-      if (sculptDrag && activeSculpt) {
-        const point = pickSculptPoint(event.clientX, event.clientY, sculptDrag.targetId);
-        const shape = shapesRef.current.find((entry) => entry.id === sculptDrag.targetId);
-        if (point && shape?.importedMesh) {
-          const patch = sculptMeshAtPoint(shape, point, activeSculpt);
+      if (activeSculpt) {
+        const targetId = sculptDrag?.targetId ?? (selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null);
+        const pick = targetId ? pickSculptHit(event.clientX, event.clientY, targetId) : null;
+        updateSculptCursor(event.clientX, event.clientY, pick);
+        const shape = sculptDrag ? shapesRef.current.find((entry) => entry.id === sculptDrag.targetId) : null;
+        if (sculptDrag && pick && shape?.importedMesh) {
+          const patch = sculptMeshAtPoint(shape, pick.point, activeSculpt);
           if (patch) {
             shapesRef.current = shapesRef.current.map((entry) => entry.id === sculptDrag.targetId ? { ...entry, ...patch } : entry);
             onUpdateShape(sculptDrag.targetId, patch);
@@ -4536,15 +4663,16 @@ export function WorkplaneViewport({
         threeRef.current.needsRender = true;
       }
     },
-    [onUpdateShape, pickPlacementSurface, pickSculptPoint, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
+    [onUpdateShape, pickPlacementSurface, pickSculptHit, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateSculptCursor, updateTransform],
   );
 
   const handlePointerLeave = useCallback(() => {
     if (workplaneModeRef.current) {
       syncWorkplaneHoverPreview(threeRef.current, null, workspaceRef.current, resolvedThemeRef.current);
     }
+    clearSculptCursor();
     if (modifierActiveRef.current) clearModifierEdgeHover();
-  }, [clearModifierEdgeHover]);
+  }, [clearModifierEdgeHover, clearSculptCursor]);
 
   const finishDrag = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -5070,6 +5198,7 @@ export function WorkplaneViewport({
             </div>
           ) : null}
           {!workplaneMode && !splitActive && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
+          {sculptSettings && sculptCursorOverlay ? <SculptCursorOverlay cursor={sculptCursorOverlay} /> : null}
           {!workplaneMode && !splitActive && moveDimensionsEnabled && moveDimensionOverlay ? (
             <MoveDimensionOverlay
               overlay={moveDimensionOverlay}
@@ -5077,7 +5206,7 @@ export function WorkplaneViewport({
               onCommit={commitMoveDimension}
             />
           ) : null}
-          {!workplaneMode && !splitActive && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive ? (
+          {!workplaneMode && !splitActive && !sculptSettings && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive ? (
             <TransformOverlay
               box={transformOverlay}
               measureKey={pinnedMeasureKey ?? hoverMeasureKey}
@@ -7328,7 +7457,7 @@ function enableAcceleratedMeshPicking(mesh: THREE.Mesh, geometry: THREE.BufferGe
   mesh.raycast = acceleratedRaycast;
   const bvhGeometry = geometry as THREE.BufferGeometry & { boundsTree?: unknown };
   if ((force || triangles >= BVH_PICKING_TRIANGLE_THRESHOLD) && !bvhGeometry.boundsTree) {
-    computeBoundsTree.call(geometry, { maxLeafSize: 12 });
+    computeBoundsTree.call(geometry, { targetLeafSize: 12 });
   }
 }
 
@@ -7660,12 +7789,10 @@ function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>)
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(mesh.positions, 3));
+  putGeometryOnBase(geometry);
   if (mesh.normals && mesh.normals.length === mesh.positions.length) {
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(mesh.normals, 3));
-  } else {
-    geometry.computeVertexNormals();
   }
-  putGeometryOnBase(geometry);
   geometry.userData.cached = true;
   const next = { geometry, edges: new Map<number, THREE.EdgesGeometry>() };
   importedGeometryCache.set(mesh, next);

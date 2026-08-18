@@ -55,6 +55,7 @@ export function SceneOverviewSidebar({
   onSetHidden,
   onSetState,
   onSetFeatureEnabled,
+  onDeleteFeature,
   onDelete,
   onGroup,
   onUngroup,
@@ -69,6 +70,7 @@ export function SceneOverviewSidebar({
   onSetHidden: (id: string, hidden: boolean) => void;
   onSetState: (id: string, state: "locked" | "hole", enabled: boolean) => void;
   onSetFeatureEnabled: (id: string, kind: ShapeFeatureKind, enabled: boolean) => void;
+  onDeleteFeature: (id: string, kind: ShapeFeatureKind) => void;
   onDelete: (ids: string[]) => void;
   onGroup: () => void;
   onUngroup: () => void;
@@ -180,10 +182,22 @@ export function SceneOverviewSidebar({
                   {features.map((kind) => {
                     const enabled = shapeFeatureEnabled(shape, kind);
                     const labels: Record<ShapeFeatureKind, string> = { edge: "Fillet / chamfer", sculpt: "Sculpt changes", sketch: "Sketch output", group: shape.groupOperation === "intersection" ? "Intersection" : "Group result" };
+                    const deleteTitle = kind === "edge" && (shape.edgeTreatmentHistory?.length ?? 0) > 1
+                      ? "Delete all fillet / chamfer features"
+                      : kind === "sketch"
+                        ? "Delete sketch output and model"
+                        : kind === "group"
+                          ? `Delete ${labels[kind].toLowerCase()} and restore operands`
+                          : `Delete ${labels[kind]}`;
                     return (
-                      <button key={kind} type="button" role="switch" aria-checked={enabled} disabled={actionsDisabled} onClick={() => onSetFeatureEnabled(shape.id, kind, !enabled)}>
-                        {enabled ? <Eye size={14} /> : <EyeOff size={14} />}<span>{labels[kind]}</span><strong>{enabled ? "On" : "Off"}</strong>
-                      </button>
+                      <div className="scene-feature-row" key={kind}>
+                        <button className="scene-feature-toggle" type="button" role="switch" aria-checked={enabled} disabled={actionsDisabled} onClick={() => onSetFeatureEnabled(shape.id, kind, !enabled)}>
+                          {enabled ? <Eye size={14} /> : <EyeOff size={14} />}<span>{labels[kind]}</span><strong>{enabled ? "On" : "Off"}</strong>
+                        </button>
+                        <button className="scene-feature-delete" type="button" title={deleteTitle} aria-label={`${deleteTitle} from ${shape.name}`} disabled={actionsDisabled || shape.locked} onClick={() => onDeleteFeature(shape.id, kind)}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>

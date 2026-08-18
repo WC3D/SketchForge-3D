@@ -1678,7 +1678,7 @@ button {
 .sculpt-toolbar-field input { width: 125px; accent-color: #087fae; }
 .sculpt-toolbar-field output { min-width: 51px; color: var(--muted-strong); font-size: 11px; font-variant-numeric: tabular-nums; }
 .sculpt-toolbar-help { margin-left: auto; padding: 0 16px; color: var(--muted-strong); font-size: 11px; }
-.workplane-wrap.sculpt-mode .three-workplane-host { cursor: crosshair; touch-action: none; }
+.workplane-wrap.sculpt-mode .three-workplane-host { touch-action: none; }
 
 .edge-modifier-header,
 .edge-modifier-quick-actions,
@@ -3880,6 +3880,10 @@ button {
 .scene-shape-properties button > span { min-width: 0; flex: 1; overflow: hidden; font-size: 9px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .scene-shape-properties button > strong { color: var(--muted-strong); font-size: 8px; text-transform: uppercase; }
 .scene-shape-properties button[aria-checked="true"] > svg { color: #0b8db7; }
+.scene-feature-row { display: grid; grid-template-columns: minmax(0, 1fr) 29px; gap: 3px; }
+.scene-feature-row .scene-feature-toggle { min-width: 0; }
+.scene-feature-row .scene-feature-delete { width: 29px; justify-content: center; padding: 0; color: var(--muted-strong); }
+.scene-feature-row .scene-feature-delete:hover:not(:disabled) { color: #a52f2f; border-color: #d99b9b; }
 .scene-group-child { width: 100%; gap: 7px; padding: 5px 7px; color: var(--foreground); text-align: left; background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
 .scene-group-child:hover { background: var(--tile); }
 .scene-group-child > span:last-child { display: grid; min-width: 0; gap: 1px; }
@@ -5482,6 +5486,54 @@ html[data-theme="dark"] .sketch-grid-settings {
 .workplane-wrap.modifier-edge-pick .three-workplane-host,
 .workplane-wrap.modifier-edge-pick .three-workplane-host:active {
   cursor: crosshair;
+}
+
+.workplane-wrap.sculpt-mode .three-workplane-host,
+.workplane-wrap.sculpt-mode .three-workplane-host:active {
+  cursor: none;
+}
+
+.sculpt-brush-cursor {
+  --sculpt-brush-color: #00a6d6;
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sculpt-brush-cursor.subtract { --sculpt-brush-color: #ef6548; }
+.sculpt-brush-cursor.smooth { --sculpt-brush-color: #8d6fe8; }
+.sculpt-brush-ring-outline {
+  fill: none;
+  stroke: rgba(8, 17, 24, 0.8);
+  stroke-width: 4.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.sculpt-brush-ring {
+  fill: color-mix(in srgb, var(--sculpt-brush-color) 9%, transparent);
+  stroke: var(--sculpt-brush-color);
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--sculpt-brush-color) 70%, transparent));
+}
+.sculpt-brush-cursor.off-surface .sculpt-brush-ring { stroke-dasharray: 3 3; }
+.sculpt-brush-center {
+  fill: color-mix(in srgb, var(--panel) 88%, transparent);
+  stroke: var(--sculpt-brush-color);
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+.sculpt-brush-glyph {
+  fill: var(--sculpt-brush-color);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 900;
+  text-anchor: middle;
+  dominant-baseline: central;
+  user-select: none;
 }
 
 .three-workplane-host canvas {
