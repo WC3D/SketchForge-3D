@@ -167,6 +167,7 @@ export type SketchPlaneAttachment = {
 };
 
 export type SketchOperation = "extrude" | "revolve";
+export type ShapeFeatureKind = "edge" | "sculpt" | "sketch" | "group";
 
 export type GearType = "spur" | "helical" | "bevel";
 
@@ -294,6 +295,9 @@ export type WorkplaneShape = {
   sketchPlane?: SketchPlaneAttachment;
   sketchOperation?: SketchOperation;
   sketchRevolve?: SketchRevolveSettings;
+  sculpted?: boolean;
+  sculptSource?: WorkplaneShape;
+  disabledFeatures?: ShapeFeatureKind[];
   edgeTreatments?: EdgeTreatmentFeature[];
   edgeTreatmentHistory?: EdgeTreatmentHistoryEntry[];
   cadDisplayEdges?: CadDisplayEdge[];

@@ -330,6 +330,8 @@ export function ShapeInspector({
   canSeparateParts = false,
   onSeparateParts,
   onInteractionActiveChange,
+  collapsed = false,
+  onCollapsedChange,
 }: {
   shape: WorkplaneShape;
   snap: GridSize;
@@ -342,6 +344,8 @@ export function ShapeInspector({
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
   onInteractionActiveChange?: (active: boolean) => void;
+  collapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
 }) {
   const solidColor = shape.color;
   const locked = Boolean(shape.locked);
@@ -362,7 +366,6 @@ export function ShapeInspector({
   const [gearTeethOpen, setGearTeethOpen] = useState(true);
   const [gearHelixOpen, setGearHelixOpen] = useState(true);
   const [colorOpen, setColorOpen] = useState(false);
-  const [minimized, setMinimized] = useState(false);
   const customColorInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => () => onInteractionActiveChange?.(false), [onInteractionActiveChange]);
@@ -386,15 +389,15 @@ export function ShapeInspector({
   }, [isSketchRevolve, shape.id]);
 
   return (
-    <aside ref={inspectorRef} className={`shape-inspector ${isSketchRevolve ? "sketch-revolve-inspector" : ""} ${shape.kind === "gear" ? "gear-inspector" : ""} ${minimized ? "minimized" : ""}`} aria-label={`${shape.name} shape settings`} onPointerDown={(event) => event.stopPropagation()}>
+    <aside ref={inspectorRef} className={`shape-inspector ${isSketchRevolve ? "sketch-revolve-inspector" : ""} ${shape.kind === "gear" ? "gear-inspector" : ""} ${collapsed ? "minimized" : ""}`} aria-label={`${shape.name} shape settings`} onPointerDown={(event) => event.stopPropagation()}>
       <div className="shape-inspector-header">
         <button
           className="inspector-header-icon"
-          aria-label={minimized ? "Expand shape settings" : "Minimize shape settings"}
-          aria-expanded={!minimized}
-          onClick={() => setMinimized((current) => !current)}
+          aria-label={collapsed ? "Expand shape settings" : "Minimize shape settings"}
+          aria-expanded={!collapsed}
+          onClick={() => onCollapsedChange?.(!collapsed)}
         >
-          {minimized ? <ChevronDown size={26} strokeWidth={2.8} /> : <ChevronUp size={26} strokeWidth={2.8} />}
+          {collapsed ? <ChevronDown size={26} strokeWidth={2.8} /> : <ChevronUp size={26} strokeWidth={2.8} />}
         </button>
         <strong>{shape.name}</strong>
         <div className="inspector-header-actions">
@@ -407,7 +410,7 @@ export function ShapeInspector({
         </div>
       </div>
 
-      {!minimized ? (
+      {!collapsed ? (
         <>
       <div className="shape-state-card" role="group" aria-label="Shape mode">
         <button

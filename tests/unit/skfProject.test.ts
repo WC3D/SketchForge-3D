@@ -295,6 +295,28 @@ describe("SketchForge .skf project packages", () => {
     expect(restored.shapes[0].edgeTreatmentHistory?.[0].before.kind).toBe("box");
   });
 
+  it("round-trips suppressed feature state and pre-sculpt source geometry", async () => {
+    const source = shape("box", "sculpt-source", { width: 12, depth: 14, height: 16 });
+    const sculpted = shape("mesh", "sculpted", {
+      sculpted: true,
+      sculptSource: source,
+      disabledFeatures: ["sculpt"],
+      importedMesh: {
+        positions: [0, 0, 0, 2, 0, 0, 0, 2, 0],
+        baseWidth: 2,
+        baseDepth: 1,
+        baseHeight: 2,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+    });
+
+    const restored = await importSkfProject(await exportSkfProject(input([sculpted])));
+    expect(restored.shapes[0].disabledFeatures).toEqual(["sculpt"]);
+    expect(restored.shapes[0].sculptSource?.kind).toBe("box");
+    expect(restored.shapes[0].sculptSource?.width).toBe(12);
+  });
+
   it("repairs duplicate descendant IDs from legacy shallow-copied groups during export", async () => {
     const roof = shape("roundRoof", "round-roof-shared-child");
     const box = shape("box", "box-shared-child");

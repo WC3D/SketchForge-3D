@@ -30,6 +30,7 @@ const COMPACT_RESOURCE_KEYS = new Set([
   "imagePlate",
   "importedMesh",
   "sketchProfile",
+  "sculptSource",
 ]);
 const COMPACT_STRING_KEYS = new Set(["cadBrep"]);
 

@@ -30,6 +30,7 @@ import { cadModifierPrimitiveForBakedShape, cadTransformFromMatrix, cadTransform
 import { createGearGeometry } from "@/lib/gearGeometry";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import type { ModelSplitPlane } from "@/lib/modelSplit";
+import { sculptMeshAtPoint, type SculptBrushSettings } from "@/lib/sculptBrush";
 import { createMoveDimensionOverlay, type MoveDimensionAxis, type MoveDimensionOverlayData } from "@/lib/moveDimensionLines";
 import {
   horizontalPlacementWorkplane,
@@ -208,6 +209,9 @@ type WorkplaneViewportProps = {
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
   onUpdateShape: (id: string, patch: ShapeUpdatePatch) => void;
+  sculptSettings?: SculptBrushSettings | null;
+  shapeInspectorCollapsed?: boolean;
+  onShapeInspectorCollapsedChange?: (collapsed: boolean) => void;
   onWorkspaceSettingsChange?: (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
   onWorkplaneModeChange: (active: boolean) => void;
   modifierActive?: boolean;
@@ -405,6 +409,7 @@ type RulerPointDragState = {
 type RotationHandleSide = "near" | "right" | "far" | "left";
 type RotationHandleSides = Record<RotationAxis, RotationHandleSide>;
 type ShapeUpdatePatch = Partial<WorkplaneShape> & { bakeTransform?: boolean };
+type SculptDragState = { pointerId: number; targetId: string };
 type ResizeSigns = { x: number; z: number };
 type ResizeAnchorMemory = {
   shapeId: string;
@@ -2242,6 +2247,9 @@ export function WorkplaneViewport({
   canSeparateParts = false,
   onSeparateParts,
   onUpdateShape,
+  sculptSettings = null,
+  shapeInspectorCollapsed = false,
+  onShapeInspectorCollapsedChange,
   onWorkspaceSettingsChange,
   onWorkplaneModeChange,
   modifierActive = false,
@@ -2304,6 +2312,8 @@ export function WorkplaneViewport({
   const moveDimensionsEnabledRef = useRef(true);
   const marqueeRef = useRef<MarqueeState | null>(null);
   const transformRef = useRef<TransformDragState | null>(null);
+  const sculptDragRef = useRef<SculptDragState | null>(null);
+  const sculptSettingsRef = useRef(sculptSettings);
   const lastResizeAnchorRef = useRef<ResizeAnchorMemory | null>(null);
   const suppressNextLiftEditRef = useRef(false);
   const snapRef = useRef(snap);
@@ -2339,6 +2349,7 @@ export function WorkplaneViewport({
   workplaneModeRef.current = workplaneMode;
   splitActiveRef.current = splitActive;
   splitPlaneRef.current = splitPlane;
+  sculptSettingsRef.current = sculptSettings;
   const perfRef = useRef({
     fps: 0,
     frameMs: 0,
@@ -3921,6 +3932,23 @@ export function WorkplaneViewport({
     return nearestId;
   }, []);
 
+  const pickSculptPoint = useCallback((clientX: number, clientY: number, targetId: string) => {
+    const state = threeRef.current;
+    if (!state) return null;
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.pointer, state.camera);
+    state.raycaster.layers.set(RENDER_LAYER_SHAPES);
+    const hit = state.raycaster.intersectObjects(state.shapeLayer.children, true).find((entry) => (
+      entry.object instanceof THREE.Mesh && entry.object.userData.shapeId === targetId
+    ));
+    if (!hit || !(hit.object instanceof THREE.Mesh)) return null;
+    hit.object.updateWorldMatrix(true, false);
+    const local = hit.object.worldToLocal(hit.point.clone());
+    return { x: local.x, y: local.y, z: local.z };
+  }, []);
+
   const pickPlacementSurface = useCallback((clientX: number, clientY: number, reverse: boolean) => {
     const state = threeRef.current;
     if (!state) return null;
@@ -4048,6 +4076,25 @@ export function WorkplaneViewport({
       if (splitActiveRef.current) return;
       clearMoveDimensions();
       const rect = state.renderer.domElement.getBoundingClientRect();
+
+      const activeSculpt = sculptSettingsRef.current;
+      const sculptTargetId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+      if (activeSculpt && sculptTargetId) {
+        event.preventDefault();
+        const point = pickSculptPoint(event.clientX, event.clientY, sculptTargetId);
+        if (!point) return;
+        const shape = shapesRef.current.find((entry) => entry.id === sculptTargetId);
+        if (!shape?.importedMesh || shape.locked) return;
+        const patch = sculptMeshAtPoint(shape, point, activeSculpt);
+        if (!patch) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        sculptDragRef.current = { pointerId: event.pointerId, targetId: sculptTargetId };
+        state.controls.enabled = false;
+        onInteractionActiveChange?.(true);
+        shapesRef.current = shapesRef.current.map((entry) => entry.id === sculptTargetId ? { ...entry, ...patch } : entry);
+        onUpdateShape(sculptTargetId, patch);
+        return;
+      }
 
       if (modifierActive) {
         event.preventDefault();
@@ -4344,6 +4391,7 @@ export function WorkplaneViewport({
       onSetPlacementWorkplane,
       onWorkplaneModeChange,
       pickPlacementSurface,
+      pickSculptPoint,
       pickModifierEdge,
       pickShape,
       pickTransformHandle,
@@ -4354,11 +4402,26 @@ export function WorkplaneViewport({
       toPlanePointAtY,
       toPlacementWorkplanePoint,
       toRawPlanePoint,
+      onUpdateShape,
     ],
   );
 
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      const sculptDrag = sculptDragRef.current;
+      const activeSculpt = sculptSettingsRef.current;
+      if (sculptDrag && activeSculpt) {
+        const point = pickSculptPoint(event.clientX, event.clientY, sculptDrag.targetId);
+        const shape = shapesRef.current.find((entry) => entry.id === sculptDrag.targetId);
+        if (point && shape?.importedMesh) {
+          const patch = sculptMeshAtPoint(shape, point, activeSculpt);
+          if (patch) {
+            shapesRef.current = shapesRef.current.map((entry) => entry.id === sculptDrag.targetId ? { ...entry, ...patch } : entry);
+            onUpdateShape(sculptDrag.targetId, patch);
+          }
+        }
+        return;
+      }
       if (workplaneModeRef.current) {
         const surface = pickPlacementSurface(event.clientX, event.clientY, event.shiftKey);
         let preview = surface?.workplane ?? null;
@@ -4473,7 +4536,7 @@ export function WorkplaneViewport({
         threeRef.current.needsRender = true;
       }
     },
-    [pickPlacementSurface, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
+    [onUpdateShape, pickPlacementSurface, pickSculptPoint, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
   );
 
   const handlePointerLeave = useCallback(() => {
@@ -4486,6 +4549,17 @@ export function WorkplaneViewport({
   const finishDrag = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const state = threeRef.current;
+      const sculptDrag = sculptDragRef.current;
+      if (sculptDrag) {
+        if (event.currentTarget.hasPointerCapture(sculptDrag.pointerId)) event.currentTarget.releasePointerCapture(sculptDrag.pointerId);
+        sculptDragRef.current = null;
+        if (state) {
+          state.controls.enabled = true;
+          state.needsRender = true;
+        }
+        onInteractionActiveChange?.(false);
+        return;
+      }
       const transform = transformRef.current;
       if (transform) {
         if (event.currentTarget.hasPointerCapture(transform.pointerId)) {
@@ -4972,7 +5046,7 @@ export function WorkplaneViewport({
         )}
       </div>
 
-      <section className={`workplane-wrap ${workplaneMode ? "placing-workplane" : ""} ${splitActive ? "split-mode" : ""} ${rulerMode ? "ruler-mode" : ""} ${rulerDeleteMode ? "ruler-delete-mode" : ""} ${rulerMoveMode ? "ruler-move-mode" : ""} ${modifierActive ? "modifier-edge-pick" : ""}`} aria-label="Workplane">
+      <section className={`workplane-wrap ${workplaneMode ? "placing-workplane" : ""} ${splitActive ? "split-mode" : ""} ${rulerMode ? "ruler-mode" : ""} ${rulerDeleteMode ? "ruler-delete-mode" : ""} ${rulerMoveMode ? "ruler-move-mode" : ""} ${modifierActive ? "modifier-edge-pick" : ""} ${sculptSettings ? "sculpt-mode" : ""}`} aria-label="Workplane">
         <div className="workplane-plane">
           <div
             className="three-workplane-host"
@@ -5051,7 +5125,7 @@ export function WorkplaneViewport({
         </div>
       </section>
 
-      {selectedShape && !splitActive && !modifierActive && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
+      {selectedShape && !shapeInspectorCollapsed && !splitActive && !modifierActive && !rulerMode && !rulerDeleteMode && !rulerMoveMode ? (
         <ShapeInspector
           shape={selectedShape}
           snap={snap}
@@ -5067,6 +5141,8 @@ export function WorkplaneViewport({
           canSeparateParts={canSeparateParts}
           onSeparateParts={onSeparateParts}
           onInteractionActiveChange={onInteractionActiveChange}
+          collapsed={shapeInspectorCollapsed}
+          onCollapsedChange={onShapeInspectorCollapsedChange}
         />
       ) : null}
 

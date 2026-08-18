@@ -67,4 +67,24 @@ describe("project shape persistence resources", () => {
     expect(currentMesh?.storageResourceId).toBeUndefined();
     expect(historyMesh).toBe(currentMesh);
   });
+
+  it("compacts and hydrates pre-sculpt source meshes", () => {
+    const source = importedShape();
+    const sculpted: WorkplaneShape = {
+      ...source,
+      id: "sculpted-1",
+      sculpted: true,
+      sculptSource: source,
+      disabledFeatures: ["sculpt"],
+      importedMesh: { ...source.importedMesh!, positions: [0, 0, 0, 2, 0, 0, 0, 2, 0], sourceFormat: "json" },
+    };
+
+    const compact = compactProjectShapeState([sculpted], []);
+    expect(compact.shapes[0].sculptSource?.importedMesh?.positions).toEqual([]);
+    expect(compact.resources.size).toBe(2);
+
+    const hydrated = hydrateProjectShapeState(compact.shapes, [], compact.resources).shapes[0];
+    expect(hydrated.disabledFeatures).toEqual(["sculpt"]);
+    expect(hydrated.sculptSource?.importedMesh?.positions).toEqual(source.importedMesh?.positions);
+  });
 });

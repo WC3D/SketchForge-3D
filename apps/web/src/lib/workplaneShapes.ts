@@ -27,6 +27,7 @@ export function cloneWorkplaneShapeTreeWithFreshIds(shape: WorkplaneShape, suffi
     ...shape,
     id: createLocalId(`${shape.id}-${suffix}`),
     groupedShapes: shape.groupedShapes?.map((child) => cloneWorkplaneShapeTreeWithFreshIds(child, suffix)),
+    sculptSource: shape.sculptSource ? cloneWorkplaneShapeTreeWithFreshIds(shape.sculptSource, suffix) : undefined,
   };
 }
 
@@ -169,6 +170,7 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
       before: canonicalizeShape(entry.before),
     }));
   }
+  if (shape.sculptSource) next.sculptSource = canonicalizeShape(shape.sculptSource);
   return next;
 }
 
@@ -216,6 +218,9 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.sketchPlane === b.sketchPlane &&
     a.sketchOperation === b.sketchOperation &&
     a.sketchRevolve === b.sketchRevolve &&
+    a.sculpted === b.sculpted &&
+    a.sculptSource === b.sculptSource &&
+    a.disabledFeatures === b.disabledFeatures &&
     a.edgeTreatments === b.edgeTreatments &&
     a.edgeTreatmentHistory === b.edgeTreatmentHistory &&
     a.cadDisplayEdges === b.cadDisplayEdges &&

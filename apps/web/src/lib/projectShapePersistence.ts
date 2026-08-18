@@ -43,6 +43,7 @@ function compactShape(shape: WorkplaneShape, resources: Map<string, ImportedMesh
       before: compactShape(entry.before, resources),
     }));
   }
+  if (shape.sculptSource) next.sculptSource = compactShape(shape.sculptSource, resources);
   return next;
 }
 
@@ -62,6 +63,7 @@ function hydrateShape(shape: WorkplaneShape, resources: ReadonlyMap<string, Impo
       before: hydrateShape(entry.before, resources),
     }));
   }
+  if (shape.sculptSource) next.sculptSource = hydrateShape(shape.sculptSource, resources);
   return next;
 }
 

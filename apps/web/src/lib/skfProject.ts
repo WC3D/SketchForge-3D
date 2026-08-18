@@ -68,6 +68,7 @@ export type SkfShapeNodeV1 = {
   definition: Record<string, unknown>;
   importedMesh?: SkfImportedMeshReferenceV1;
   groupedShapeNodeIds?: string[];
+  sculptSourceNodeId?: string;
   edgeTreatmentHistory?: Array<{
     id: string;
     createdAt: number;
@@ -418,6 +419,7 @@ function referencedSourceAssetIds(states: WorkplaneShape[][]) {
     if (shape.importedMesh?.assetId) ids.add(shape.importedMesh.assetId);
     shape.groupedShapes?.forEach(visit);
     shape.edgeTreatmentHistory?.forEach((entry) => visit(entry.before));
+    if (shape.sculptSource) visit(shape.sculptSource);
   };
   states.flat().forEach(visit);
   return ids;
@@ -433,6 +435,7 @@ async function serializeShapeNode(
   const {
     importedMesh,
     groupedShapes,
+    sculptSource,
     edgeTreatmentHistory,
     cadBrep,
     imagePlate,
@@ -516,6 +519,9 @@ async function serializeShapeNode(
       beforeNodeId,
     });
   }
+  const sculptSourceNodeId = sculptSource
+    ? await serializeShapeNode(sculptSource, `${nodeId}/sculpt/source`, nodes, builder, sourceAssetsByArchiveId)
+    : undefined;
 
   const objectType = groupedShapeNodeIds.length
     ? "group"
@@ -534,6 +540,7 @@ async function serializeShapeNode(
     definition,
     ...(importedReference ? { importedMesh: importedReference } : {}),
     ...(groupedShapeNodeIds.length ? { groupedShapeNodeIds } : {}),
+    ...(sculptSourceNodeId ? { sculptSourceNodeId } : {}),
     ...(serializedEdgeHistory.length ? { edgeTreatmentHistory: serializedEdgeHistory } : {}),
     ...(cadBrepAssetId ? { cadBrepAssetId } : {}),
   });
@@ -1148,6 +1155,7 @@ async function validateDocumentAndAssets(raw: unknown, files: ArchiveFiles) {
       }
       (node.groupedShapeNodeIds ?? []).forEach((child) => walk(child, primary));
       (node.edgeTreatmentHistory ?? []).forEach((entry) => walk(entry.beforeNodeId, false));
+      if (node.sculptSourceNodeId) walk(node.sculptSourceNodeId, false);
       visiting.delete(nodeId);
       visited.add(`${primary ? "primary" : "history"}:${nodeId}`);
     };
@@ -1269,6 +1277,9 @@ async function restoreShapeFromNode(
         ...(entry.appliedFrame ? { appliedFrame: entry.appliedFrame as NonNullable<WorkplaneShape["edgeTreatmentHistory"]>[number]["appliedFrame"] } : {}),
       })))
     : undefined;
+  const sculptSource = node.sculptSourceNodeId
+    ? await restoreShapeFromNode(node.sculptSourceNodeId, nodeById, assetById, files, runtimeAssetByArchiveId, sourceMeshCache, sourceImporter, new Set(restoring))
+    : undefined;
   const cadBrepRecord = node.cadBrepAssetId ? assetById.get(node.cadBrepAssetId) : undefined;
   restoring.delete(nodeId);
   return canonicalizeShape({
@@ -1276,6 +1287,7 @@ async function restoreShapeFromNode(
     ...(importedMesh ? { importedMesh } : {}),
     ...(groupedShapes ? { groupedShapes } : {}),
     ...(edgeTreatmentHistory ? { edgeTreatmentHistory } : {}),
+    ...(sculptSource ? { sculptSource } : {}),
     ...(cadBrepRecord ? { cadBrep: strFromU8(files[cadBrepRecord.path]) } : {}),
   });
 }
