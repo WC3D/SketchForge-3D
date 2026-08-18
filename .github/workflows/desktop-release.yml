@@ -39,12 +39,15 @@ jobs:
       - name: Resolve release version
         id: version
         shell: pwsh
+        env:
+          INPUTS_VERSION: ${{ inputs.version }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ inputs.version }}".Trim().TrimStart("v")
+            $version = "$env:INPUTS_VERSION".Trim().TrimStart("v")
             $tag = "v$version"
           } else {
-            $tag = "${{ github.ref_name }}"
+            $tag = "$env:GITHUB_REF_NAME"
             $version = $tag.TrimStart("v")
           }
 
