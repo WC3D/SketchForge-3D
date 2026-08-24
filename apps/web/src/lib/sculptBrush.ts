@@ -50,7 +50,69 @@ function pointSegmentDistanceSquared(point: SculptPoint, a: SculptPoint, b: Scul
   return (point.x - x) ** 2 + (point.y - y) ** 2 + (point.z - z) ** 2;
 }
 
-function remeshSmoothRegion(
+function pointTriangleDistanceSquared(point: SculptPoint, a: SculptPoint, b: SculptPoint, c: SculptPoint) {
+  const ab = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  const ac = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+  const ap = { x: point.x - a.x, y: point.y - a.y, z: point.z - a.z };
+  const dot = (left: SculptPoint, right: SculptPoint) => left.x * right.x + left.y * right.y + left.z * right.z;
+  const distanceSquared = (left: SculptPoint, right: SculptPoint) => (
+    (left.x - right.x) ** 2 + (left.y - right.y) ** 2 + (left.z - right.z) ** 2
+  );
+  const d1 = dot(ab, ap);
+  const d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return distanceSquared(point, a);
+
+  const bp = { x: point.x - b.x, y: point.y - b.y, z: point.z - b.z };
+  const d3 = dot(ab, bp);
+  const d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return distanceSquared(point, b);
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const scale = d1 / (d1 - d3);
+    return distanceSquared(point, { x: a.x + ab.x * scale, y: a.y + ab.y * scale, z: a.z + ab.z * scale });
+  }
+
+  const cp = { x: point.x - c.x, y: point.y - c.y, z: point.z - c.z };
+  const d5 = dot(ab, cp);
+  const d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return distanceSquared(point, c);
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const scale = d2 / (d2 - d6);
+    return distanceSquared(point, { x: a.x + ac.x * scale, y: a.y + ac.y * scale, z: a.z + ac.z * scale });
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const scale = (d4 - d3) / (d4 - d3 + d5 - d6);
+    return distanceSquared(point, {
+      x: b.x + (c.x - b.x) * scale,
+      y: b.y + (c.y - b.y) * scale,
+      z: b.z + (c.z - b.z) * scale,
+    });
+  }
+
+  const total = va + vb + vc;
+  if (Math.abs(total) <= 1e-20) {
+    return Math.min(
+      pointSegmentDistanceSquared(point, a, b),
+      pointSegmentDistanceSquared(point, b, c),
+      pointSegmentDistanceSquared(point, c, a),
+    );
+  }
+  const inverse = 1 / total;
+  const abScale = vb * inverse;
+  const acScale = vc * inverse;
+  return distanceSquared(point, {
+    x: a.x + ab.x * abScale + ac.x * acScale,
+    y: a.y + ab.y * abScale + ac.y * acScale,
+    z: a.z + ab.z * abScale + ac.z * acScale,
+  });
+}
+
+function remeshSculptRegion(
   sourceVertices: SculptPoint[],
   sourceTriangles: Triangle[],
   point: SculptPoint,
@@ -66,33 +128,43 @@ function remeshSmoothRegion(
   );
 
   for (let pass = 0; pass < MAX_REMESH_PASSES && triangles.length < triangleLimit; pass += 1) {
-    const candidates = new Map<string, { a: number; b: number; distanceSquared: number; lengthSquared: number; uses: number }>();
-    const registerEdge = (a: number, b: number) => {
+    const candidates = new Map<string, { a: number; b: number; distanceSquared: number; lengthSquared: number; uses: number; eligible: boolean }>();
+    const registerEdge = (a: number, b: number, triangleIntersectsBrush: boolean) => {
       if (a === b) return;
       const start = vertices[a];
       const end = vertices[b];
       const lengthSquared = (end.x - start.x) ** 2 + (end.y - start.y) ** 2 + (end.z - start.z) ** 2;
-      if (lengthSquared <= targetEdgeSquared) return;
       const distanceSquared = pointSegmentDistanceSquared(point, start, end);
-      if (distanceSquared >= radiusSquared) return;
       const key = edgeKey(a, b);
       const existing = candidates.get(key);
       if (existing) {
         existing.uses += 1;
+        existing.eligible ||= triangleIntersectsBrush || distanceSquared < radiusSquared;
       } else {
-        candidates.set(key, { a, b, distanceSquared, lengthSquared, uses: 1 });
+        candidates.set(key, {
+          a,
+          b,
+          distanceSquared,
+          lengthSquared,
+          uses: 1,
+          eligible: triangleIntersectsBrush || distanceSquared < radiusSquared,
+        });
       }
     };
     triangles.forEach(([a, b, c]) => {
-      registerEdge(a, b);
-      registerEdge(b, c);
-      registerEdge(c, a);
+      const triangleIntersectsBrush = pointTriangleDistanceSquared(point, vertices[a], vertices[b], vertices[c]) < radiusSquared;
+      registerEdge(a, b, triangleIntersectsBrush);
+      registerEdge(b, c, triangleIntersectsBrush);
+      registerEdge(c, a, triangleIntersectsBrush);
     });
-    if (candidates.size === 0) break;
+    const eligibleCandidates = [...candidates.entries()].filter(([, candidate]) => (
+      candidate.eligible && candidate.lengthSquared > targetEdgeSquared
+    ));
+    if (eligibleCandidates.length === 0) break;
 
     const selectedEdges = new Set<string>();
     let availableTriangles = triangleLimit - triangles.length;
-    [...candidates.entries()]
+    eligibleCandidates
       .sort(([, left], [, right]) => left.distanceSquared - right.distanceSquared || right.lengthSquared - left.lengthSquared)
       .forEach(([key, candidate]) => {
         // Splitting an edge adds one triangle for every face that uses it.
@@ -272,11 +344,9 @@ export function sculptMeshAtPoint(
   for (let index = 0; index + 2 < sourceToWelded.length; index += 3) {
     triangles.push([sourceToWelded[index], sourceToWelded[index + 1], sourceToWelded[index + 2]]);
   }
-  if (settings.kind === "smooth") {
-    const remeshed = remeshSmoothRegion(vertices, triangles, point, radius);
-    vertices = remeshed.vertices;
-    triangles = remeshed.triangles;
-  }
+  const remeshed = remeshSculptRegion(vertices, triangles, point, radius);
+  vertices = remeshed.vertices;
+  triangles = remeshed.triangles;
 
   const normals = vertices.map(() => ({ x: 0, y: 0, z: 0 }));
   triangles.forEach(([a, b, c]) => {
