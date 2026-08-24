@@ -61,6 +61,7 @@ export type WorkplaneWorkspaceSettings = {
   showShadows: boolean;
   showGrid: boolean;
   cruiseShapes: boolean;
+  selectBeforeMove: boolean;
   zoomSpeed: number;
   units: string;
   scale: string;
@@ -255,6 +256,13 @@ export type WorkplaneShape = {
   segments?: number;
   topRadius?: number;
   baseRadius?: number;
+  taperTopWidth?: number;
+  taperTopDepth?: number;
+  taperBottomWidth?: number;
+  taperBottomDepth?: number;
+  /** Legacy local-dev taper fields kept for compatibility with in-progress projects. */
+  taperTopScale?: number;
+  taperBottomScale?: number;
   teeth?: number;
   toothSize?: number;
   toothWidth?: number;

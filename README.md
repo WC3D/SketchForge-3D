@@ -19,7 +19,7 @@
     <a href="https://github.com/Formsmith746/SketchForge-3D/stargazers"><img alt="Star SketchForge on GitHub" src="https://img.shields.io/github/stars/Formsmith746/SketchForge-3D?style=flat&logo=github"></a>
     <a href="https://github.com/sponsors/Formsmith746"><img alt="Sponsor SketchForge on GitHub" src="https://img.shields.io/badge/GitHub-Sponsor-ea4aaa?logo=githubsponsors&logoColor=white"></a>
     <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
-    <img alt="Version v1.0.3" src="https://img.shields.io/badge/version-v1.0.3-2563eb">
+    <img alt="Version v1.0.6" src="https://img.shields.io/badge/version-v1.0.6-2563eb">
   </p>
 </div>
 
@@ -81,6 +81,35 @@ There are two common ways to run SketchForge. If you are not sure which one to c
 | Local development | Developers who want to edit the code | Medium |
 
 SketchForge is local-first in both modes. The app files may be served from a computer or server, but projects stay in each user's browser storage. STL and OBJ exports download through the user's browser. SketchForge does not upload models to a SketchForge cloud service.
+
+## macOS Desktop Release
+
+GitHub releases include macOS DMG files for Intel (`x64`) and Apple Silicon (`arm64`) Macs. Choose the file that matches your Mac.
+
+1. Open the downloaded DMG file.
+2. Drag `SketchForge.app` to the `Applications` folder.
+3. Eject the DMG file.
+4. Control-click `SketchForge.app` in `Applications`.
+5. Select **Open**, then select **Open** again.
+
+Unsigned releases have `-unsigned` in the file name. macOS shows a Gatekeeper warning for these releases. If macOS does not show the **Open** option, run this command in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SketchForge.app
+open /Applications/SketchForge.app
+```
+
+Do not open the app from Safari's Downloads folder or directly from the mounted DMG. Copy it to `Applications` first.
+
+### macOS Virtual Machines
+
+Some macOS virtual machines do not provide hardware WebGL. Launch SketchForge with software WebGL in that case:
+
+```bash
+/Applications/SketchForge.app/Contents/MacOS/SketchForge \
+  --use-angle=swiftshader \
+  --enable-unsafe-swiftshader
+```
 
 ### Download the Project
 

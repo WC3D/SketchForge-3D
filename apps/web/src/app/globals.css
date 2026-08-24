@@ -4314,6 +4314,87 @@ button {
   vector-effect: non-scaling-stroke;
 }
 
+.sketch-primitive-preview {
+  fill: rgba(0, 159, 227, 0.12);
+  stroke: rgba(0, 117, 184, 0.92);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-primitive-center {
+  fill: #ffffff;
+  stroke: rgba(0, 117, 184, 0.95);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-profile-hit-targets path {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 10;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+
+.sketch-primitive-source {
+  cursor: grab;
+}
+
+.sketch-primitive-source:active {
+  cursor: grabbing;
+}
+
+.sketch-geometry-selection-box {
+  fill: rgba(0, 117, 184, 0.025);
+  stroke: rgba(0, 117, 184, 0.82);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+
+.sketch-geometry-resize-handle {
+  fill: #ffffff;
+  stroke: rgba(0, 117, 184, 0.95);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sketch-geometry-resize-handle.handle-nw,
+.sketch-geometry-resize-handle.handle-se {
+  cursor: nwse-resize;
+}
+
+.sketch-geometry-resize-handle.handle-ne,
+.sketch-geometry-resize-handle.handle-sw {
+  cursor: nesw-resize;
+}
+
+.sketch-geometry-resize-handle.handle-n,
+.sketch-geometry-resize-handle.handle-s {
+  cursor: ns-resize;
+}
+
+.sketch-geometry-resize-handle.handle-e,
+.sketch-geometry-resize-handle.handle-w {
+  cursor: ew-resize;
+}
+
+.sketch-geometry-dimension rect {
+  fill: rgba(255, 255, 255, 0.98);
+  stroke: rgba(0, 117, 184, 0.8);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 1px 2px rgba(25, 55, 76, 0.14));
+}
+
+.sketch-geometry-dimension text {
+  fill: #173b5a;
+  font-weight: 750;
+  text-anchor: middle;
+}
+
 .sketch-plate-background {
   fill: #ddf8ff;
   stroke: none;
@@ -6055,8 +6136,8 @@ html[data-theme="dark"] .sketch-grid-settings {
 
 .rotate-handle {
   z-index: 3;
-  width: 42px;
-  height: 42px;
+  width: 52px;
+  height: 52px;
   color: rgba(47, 61, 70, 0.6);
   background: transparent;
   border: 0;
@@ -6064,7 +6145,7 @@ html[data-theme="dark"] .sketch-grid-settings {
   box-shadow: none;
   cursor: grab;
   opacity: 1;
-  transform: translate3d(var(--overlay-x, 0), var(--overlay-y, 0), 0) translate(-50%, -50%) rotate(var(--rotate-handle-angle, 0deg));
+  transform: translate3d(var(--overlay-x, 0), var(--overlay-y, 0), 0) translate(-50%, -50%);
 }
 
 .rotate-handle:hover {
@@ -6074,8 +6155,8 @@ html[data-theme="dark"] .sketch-grid-settings {
 .rotate-handle-icon,
 .rotate-handle-icon svg {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
 }
 
 .rotate-handle-icon {
@@ -6087,6 +6168,16 @@ html[data-theme="dark"] .sketch-grid-settings {
 
 .rotate-handle-icon svg {
   fill: currentColor;
+  transform: matrix(
+    var(--rotate-plane-a, 1),
+    var(--rotate-plane-b, 0),
+    var(--rotate-plane-c, 0),
+    var(--rotate-plane-d, 1),
+    0,
+    0
+  );
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 .rotation-edit {
