@@ -215,7 +215,8 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
     mirrorZ: shape.mirrorZ || undefined,
   };
   if (shape.groupedShapes) {
-    next.groupedShapes = shape.groupedShapes.map(canonicalizeShape);
+    const children = shape.groupedShapes.map(canonicalizeShape);
+    next.groupedShapes = children.every((child, index) => child === shape.groupedShapes![index]) ? shape.groupedShapes : children;
   }
   if (shape.sketchRevolve) {
     next.sketchRevolve = {
@@ -224,14 +225,17 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
       sides: shape.sketchRevolve.sides,
       quality: shape.sketchRevolve.quality,
     };
+    if (Object.keys(shape.sketchRevolve).every((key) => key in next.sketchRevolve!)) next.sketchRevolve = shape.sketchRevolve;
   }
   if (shape.edgeTreatmentHistory) {
-    next.edgeTreatmentHistory = shape.edgeTreatmentHistory.map((entry) => ({
-      ...entry,
-      before: canonicalizeShape(entry.before),
-    }));
+    const history = shape.edgeTreatmentHistory.map((entry) => {
+      const before = canonicalizeShape(entry.before);
+      return before === entry.before ? entry : { ...entry, before };
+    });
+    next.edgeTreatmentHistory = history.every((entry, index) => entry === shape.edgeTreatmentHistory![index]) ? shape.edgeTreatmentHistory : history;
   }
-  return next;
+  // Preserve immutable resource identity when normalization has nothing to do.
+  return (Object.keys(next) as Array<keyof WorkplaneShape>).every((key) => next[key] === shape[key]) ? shape : next;
 }
 
 export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {

@@ -22,6 +22,7 @@ type ResourceSignature = {
 };
 
 const resourceSignatureCache = new WeakMap<object, ResourceSignature>();
+const resourcesBeingSigned = new WeakSet<object>();
 const stringSignatureCache = new Map<string, ResourceSignature>();
 const MAX_CACHED_STRING_SIGNATURES = 64;
 const STREAMED_NUMERIC_ARRAY_LENGTH = 10_000;
@@ -159,7 +160,22 @@ function signatureFromStreamedValue(resource: object) {
 
 function signatureWithStreamedNumericArrays(resource: object) {
   let streamedBytes = 0;
-  const serialized = JSON.stringify(resource, (_key, value: unknown) => {
+  const countedResources = new Set<object | string>();
+  const serialized = JSON.stringify(resource, (key, value: unknown) => {
+    // A reversible operation embeds a before-shape, which can itself contain
+    // large immutable geometry. Reuse those signatures across history wrappers.
+    const nestedSignature = key && COMPACT_RESOURCE_KEYS.has(key) && value !== null && typeof value === "object"
+      ? objectResourceSignature(value)
+      : COMPACT_STRING_KEYS.has(key) && typeof value === "string" && value.length > 0
+        ? stringResourceSignature(value)
+        : undefined;
+    if (nestedSignature) {
+      if (!countedResources.has(value as object | string)) {
+        countedResources.add(value as object | string);
+        streamedBytes += nestedSignature.estimatedBytes;
+      }
+      return { $resource: key, fingerprint: nestedSignature.fingerprint };
+    }
     const signature = largeNumericArraySignature(value);
     if (!signature) return value;
     streamedBytes += signature.estimatedBytes;
@@ -172,12 +188,16 @@ function signatureWithStreamedNumericArrays(resource: object) {
 function objectResourceSignature(resource: object) {
   const cached = resourceSignatureCache.get(resource);
   if (cached) return cached;
+  if (resourcesBeingSigned.has(resource)) throw new TypeError("Cannot fingerprint a circular resource");
+  resourcesBeingSigned.add(resource);
   let signature: ResourceSignature;
   try {
     signature = signatureWithStreamedNumericArrays(resource);
   } catch (error) {
     if (!(error instanceof RangeError) || !/string length/i.test(error.message)) throw error;
     signature = signatureFromStreamedValue(resource);
+  } finally {
+    resourcesBeingSigned.delete(resource);
   }
   resourceSignatureCache.set(resource, signature);
   return signature;

@@ -87,6 +87,7 @@ import { cloneWorkplaneShapeSnapshot, compactEdgeTreatmentHistory, edgeTreatment
 import { appendEditorHistorySnapshot, boundedEditorHistoryState, editorHistoryEntry, editorHistoryForExport, hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry, type EditorHistoryExportLimit, type EditorHistoryState } from "@/lib/editorHistory";
 import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
 import { geometryRotationDegreesForShortcut, geometryRotationDelta, rotatedGeometryShapePatch } from "@/lib/geometryRotation";
+import { createKeyboardMovementInteraction, isMovementKey, moveShapesByKeyboard } from "@/lib/keyboardMovement";
 import { createLocalId } from "@/lib/localIds";
 import { projectExportFileName } from "@/lib/exportNames";
 import { exportMeshesToObj } from "@/lib/objExport";
@@ -6050,12 +6051,12 @@ export function SketchForgeEditor({
   }, [alignAnchorId, selectedIds, selectedShapes.length]);
 
   const syncProjectShapes = useCallback(
-    (nextShapes: WorkplaneShape[], force = false) => {
+    (nextShapes: WorkplaneShape[], force = false, immediate = false) => {
       if (!projectId || !onProjectShapesChange) {
         return;
       }
       if (projectInteractionActiveRef.current) {
-        pendingProjectShapesRef.current = nextShapes.map(canonicalizeShape);
+        pendingProjectShapesRef.current = nextShapes;
         if (projectSyncTimerRef.current !== null) {
           window.clearTimeout(projectSyncTimerRef.current);
           projectSyncTimerRef.current = null;
@@ -6070,7 +6071,8 @@ export function SketchForgeEditor({
       if (projectSyncTimerRef.current !== null) {
         window.clearTimeout(projectSyncTimerRef.current);
       }
-      projectSyncTimerRef.current = window.setTimeout(() => {
+      const publish = () => {
+        projectSyncTimerRef.current = null;
         lastProjectShapesSyncRef.current = serialized;
         lastProjectShapesEchoRef.current = serialized;
         onProjectShapesChange({
@@ -6087,8 +6089,9 @@ export function SketchForgeEditor({
           placementWorkplane: placementWorkplaneRef.current,
           sketchPlacementWorkplane: placementWorkplaneRef.current,
         });
-        projectSyncTimerRef.current = null;
-      }, 120);
+      };
+      if (immediate) publish();
+      else projectSyncTimerRef.current = window.setTimeout(publish, 120);
     },
     [onProjectShapesChange, projectId],
   );
@@ -6161,6 +6164,11 @@ export function SketchForgeEditor({
   const updateProjectInteractionActive = useCallback(
     (active: boolean) => {
       if (active) {
+        if (projectSyncTimerRef.current !== null) {
+          window.clearTimeout(projectSyncTimerRef.current);
+          projectSyncTimerRef.current = null;
+          pendingProjectShapesRef.current = shapesRef.current;
+        }
         if (interactionHistoryTimerRef.current !== null) {
           window.clearTimeout(interactionHistoryTimerRef.current);
           interactionHistoryTimerRef.current = null;
@@ -6187,6 +6195,59 @@ export function SketchForgeEditor({
     },
     [finalizeInteractionHistory],
   );
+
+  const keyboardMovement = useMemo(() => createKeyboardMovementInteraction({
+    begin: () => {
+      if (projectInteractionActiveRef.current) return false;
+      const selected = new Set(selectedIdsRef.current);
+      if (!shapesRef.current.some((shape) => selected.has(shape.id) && !shape.locked)) return false;
+      updateProjectInteractionActive(true);
+      return true;
+    },
+    move: (event) => {
+      const next = moveShapesByKeyboard(shapesRef.current, selectedIdsRef.current, event, placementWorkplaneRef.current);
+      if (next === shapesRef.current) return;
+      interactionHistoryChangedRef.current = true;
+      shapesRef.current = next;
+      pendingProjectShapesRef.current = next;
+      setShapes(next);
+      setNotice("Moved selection");
+    },
+    end: () => {
+      updateProjectInteractionActive(false);
+      if (interactionHistoryTimerRef.current !== null) {
+        window.clearTimeout(interactionHistoryTimerRef.current);
+        interactionHistoryTimerRef.current = null;
+      }
+      // Unlike pointer updates, keyboard moves update shapesRef synchronously.
+      // Commit before another tap/shortcut or navigation can observe the scene.
+      finalizeInteractionHistory();
+      pendingProjectShapesRef.current = null;
+      syncProjectShapes(shapesRef.current, false, true);
+    },
+  }), [finalizeInteractionHistory, syncProjectShapes, updateProjectInteractionActive]);
+
+  useEffect(() => {
+    const keyUp = (event: KeyboardEvent) => keyboardMovement.keyUp(event.key);
+    const visibilityChange = () => {
+      if (document.visibilityState === "hidden") keyboardMovement.finish();
+    };
+    window.addEventListener("keyup", keyUp);
+    window.addEventListener("blur", keyboardMovement.finish);
+    window.addEventListener("pagehide", keyboardMovement.finish);
+    window.addEventListener("pointerdown", keyboardMovement.finish, true);
+    window.addEventListener("focusin", keyboardMovement.finish);
+    document.addEventListener("visibilitychange", visibilityChange);
+    return () => {
+      window.removeEventListener("keyup", keyUp);
+      window.removeEventListener("blur", keyboardMovement.finish);
+      window.removeEventListener("pagehide", keyboardMovement.finish);
+      window.removeEventListener("pointerdown", keyboardMovement.finish, true);
+      window.removeEventListener("focusin", keyboardMovement.finish);
+      document.removeEventListener("visibilitychange", visibilityChange);
+      keyboardMovement.finish();
+    };
+  }, [keyboardMovement]);
 
   const updateProjectWorkspaceSettings = useCallback(
     (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
@@ -7749,31 +7810,6 @@ export function SketchForgeEditor({
     );
   }, [commitShapes, hasSelection, selectedIds, selectedShapes, shapes]);
 
-  const raiseSelected = useCallback(
-    (delta: number) => {
-      if (!hasSelection) {
-        return;
-      }
-      const selected = new Set(selectedIds);
-      const normal = placementWorkplane.normal;
-      commitShapes(
-        shapes.map((shape) =>
-          selected.has(shape.id) && !shape.locked
-            ? {
-                ...shape,
-                x: cleanNearZero(shape.x + normal.x * delta),
-                z: cleanNearZero(shape.z + normal.z * delta),
-                elevation: cleanNearZero((shape.elevation ?? 0) + normal.y * delta),
-              }
-            : shape,
-        ),
-        selectedIds,
-        delta > 0 ? "Moved selection up" : "Moved selection down",
-      );
-    },
-    [commitShapes, hasSelection, placementWorkplane, selectedIds, shapes],
-  );
-
   const dropSelectedToWorkplane = useCallback(() => {
     if (!hasSelection) {
       setNotice("Select a shape first");
@@ -8840,35 +8876,6 @@ export function SketchForgeEditor({
     });
   }, []);
 
-  const nudgeSelected = useCallback(
-    (deltaX: number, deltaZ: number) => {
-      if (!hasSelection) {
-        return;
-      }
-      const selected = new Set(selectedIds);
-      const translation = {
-        x: placementWorkplane.xAxis.x * deltaX + placementWorkplane.zAxis.x * deltaZ,
-        y: placementWorkplane.xAxis.y * deltaX + placementWorkplane.zAxis.y * deltaZ,
-        z: placementWorkplane.xAxis.z * deltaX + placementWorkplane.zAxis.z * deltaZ,
-      };
-      commitShapes(
-        shapes.map((shape) =>
-          selected.has(shape.id) && !shape.locked
-            ? {
-                ...shape,
-                x: cleanNearZero(shape.x + translation.x),
-                z: cleanNearZero(shape.z + translation.z),
-                elevation: cleanNearZero((shape.elevation ?? 0) + translation.y),
-              }
-            : shape,
-        ),
-        selectedIds,
-        `Moved ${selectedShapes.length} shape${selectedShapes.length === 1 ? "" : "s"}`,
-      );
-    },
-    [commitShapes, hasSelection, placementWorkplane, selectedIds, selectedShapes.length, shapes],
-  );
-
   const rotateSelectedBy = useCallback((angleDegrees: number) => {
     if (!hasSelection) {
       return;
@@ -8915,13 +8922,19 @@ export function SketchForgeEditor({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isTypingTarget(event.target)) {
+        keyboardMovement.finish();
         return;
       }
 
       const key = event.key.toLowerCase();
       const shortcut = event.ctrlKey || event.metaKey;
 
+      if (!isMovementKey(event.key) && !["Shift", "Control", "Meta", "Alt"].includes(event.key)) {
+        keyboardMovement.finish();
+      }
+
       if (sketchActive && toolbarMode === "sketch") {
+        keyboardMovement.finish();
         if (event.key === "Escape") {
           event.preventDefault();
           setSketchActivePointId(null);
@@ -9041,25 +9054,9 @@ export function SketchForgeEditor({
         return;
       }
 
-      const step = event.shiftKey ? 5 : 1;
-      if (shortcut && event.key === "ArrowUp") {
+      if (isMovementKey(event.key)) {
         event.preventDefault();
-        raiseSelected(step);
-      } else if (shortcut && event.key === "ArrowDown") {
-        event.preventDefault();
-        raiseSelected(-step);
-      } else if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        nudgeSelected(-step, 0);
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        nudgeSelected(step, 0);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        nudgeSelected(0, -step);
-      } else if (event.key === "ArrowDown") {
-        event.preventDefault();
-        nudgeSelected(0, step);
+        keyboardMovement.keyDown(event);
       } else if (key === "d" && hasSelection) {
         event.preventDefault();
         dropSelectedToWorkplane();
@@ -9088,9 +9085,8 @@ export function SketchForgeEditor({
     dropSelectedToWorkplane,
     groupSelected,
     hasSelection,
-    nudgeSelected,
+    keyboardMovement,
     pasteShape,
-    raiseSelected,
     redo,
     rotateSelectedBy,
     rotateSelectedClosedSketch45,
