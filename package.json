@@ -59,7 +59,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "sharp": "0.35.3",
+    "sharp": "0.35.4",
     "next": {
       "postcss": "8.5.22"
     }
