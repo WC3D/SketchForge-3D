@@ -68,7 +68,7 @@
   "overrides": {
     "sharp": "0.35.4",
     "next": {
-      "postcss": "8.5.22"
+      "postcss": "8.5.23"
     }
   }
 }

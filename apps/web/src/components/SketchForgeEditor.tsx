@@ -6725,7 +6725,9 @@ export function SketchForgeEditor({
   useEffect(() => {
     const runId = projectSnapshotRunRef.current + 1;
     projectSnapshotRunRef.current = runId;
-    if (!projectId || !onProjectSnapshot || typeof window === "undefined") {
+    // A sculpt dab replaces the whole immutable mesh. Do not hash its millions
+    // of coordinates for a thumbnail that cannot be captured during a stroke.
+    if (!projectId || !onProjectSnapshot || typeof window === "undefined" || projectInteractionActive) {
       return;
     }
     const sceneKey = { projectId, fingerprint: projectShapesFingerprint(shapes) };
@@ -6736,10 +6738,6 @@ export function SketchForgeEditor({
     if (!projectThumbnailSceneChanged(lastProjectSnapshotRef.current, sceneKey)) {
       return;
     }
-    if (projectInteractionActive) {
-      return;
-    }
-
     let stopped = false;
     let uploadController: AbortController | null = null;
     const capture = async () => {

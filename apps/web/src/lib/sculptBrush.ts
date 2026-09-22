@@ -316,7 +316,7 @@ function clearedSculptMetadata() {
 }
 
 export function sculptMeshAtPoint(
-  shape: WorkplaneShape,
+  shape: Pick<WorkplaneShape, "x" | "z" | "elevation" | "importedMesh">,
   point: SculptPoint,
   settings: SculptBrushSettings,
 ): Partial<WorkplaneShape> | null {

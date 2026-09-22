@@ -30,7 +30,11 @@ import { cadModifierPrimitiveForBakedShape, cadTransformFromMatrix, cadTransform
 import { createGearGeometry } from "@/lib/gearGeometry";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import type { ModelSplitPlane } from "@/lib/modelSplit";
-import { sculptMeshAtPoint, type SculptBrushSettings, type SculptPoint } from "@/lib/sculptBrush";
+import type { SculptBrushSettings, SculptPoint } from "@/lib/sculptBrush";
+import { SculptStroke } from "@/lib/sculptStroke";
+import { releaseSculptGeometry, restoreSculptGeometry, retainSculptGeometry, SCULPT_EDGE_TRIANGLE_LIMIT, SCULPT_SELECTED_EDGE_ANGLE } from "@/lib/sculptGeometry";
+import { copySculptNumbers } from "@/lib/sculptTransfer";
+import type { SculptRequest, SculptResponse } from "@/workers/sculpt.worker";
 import { sculptBrushRing } from "@/lib/sculptCursor";
 import { createMoveDimensionOverlay, type MoveDimensionAxis, type MoveDimensionOverlayData } from "@/lib/moveDimensionLines";
 import {
@@ -152,8 +156,8 @@ const sharedLineMaterialCache = new Map<string, THREE.LineBasicMaterial>();
 const shapeResourceIds = new WeakMap<object, number>();
 let nextShapeResourceId = 1;
 const imageTextureLoader = new THREE.TextureLoader();
-const IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT = 40000;
-const NORMAL_IMPORTED_SELECTION_EDGE_ANGLE = 60;
+const IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT = SCULPT_EDGE_TRIANGLE_LIMIT;
+const NORMAL_IMPORTED_SELECTION_EDGE_ANGLE = SCULPT_SELECTED_EDGE_ANGLE;
 const MODIFIER_EDGE_PICK_RADIUS_PX = 14;
 
 function parseDroppedShapeAsset(raw: string): ShapeAsset | null {
@@ -301,6 +305,7 @@ type ThreeState = {
   moveDimensionLayer: THREE.Group;
   modifierLayer: THREE.Group;
   shapeRecords: Map<string, ShapeRenderRecord>;
+  sculptModeActive: boolean;
   officialShapeLayerActive: boolean;
   raycaster: THREE.Raycaster;
   pointer: THREE.Vector2;
@@ -2551,6 +2556,10 @@ export function WorkplaneViewport({
   const marqueeRef = useRef<MarqueeState | null>(null);
   const transformRef = useRef<TransformDragState | null>(null);
   const sculptDragRef = useRef<SculptDragState | null>(null);
+  const sculptStrokeRef = useRef<{ queue: SculptStroke<{ clientX: number; clientY: number }>; worker: Worker; targetId: string } | null>(null);
+  const sculptCursorFrameRef = useRef<number | null>(null);
+  const sculptPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const [sculptError, setSculptError] = useState<string | null>(null);
   const sculptSettingsRef = useRef(sculptSettings);
   const sculptCursorSourceRef = useRef<SculptCursorSource | null>(null);
   const sculptCursorOverlayRef = useRef<SculptCursorOverlayState | null>(null);
@@ -2590,6 +2599,7 @@ export function WorkplaneViewport({
   splitActiveRef.current = splitActive;
   splitPlaneRef.current = splitPlane;
   sculptSettingsRef.current = sculptSettings;
+  if (threeRef.current) threeRef.current.sculptModeActive = Boolean(sculptSettings);
   const perfRef = useRef({
     fps: 0,
     frameMs: 0,
@@ -2600,6 +2610,9 @@ export function WorkplaneViewport({
 
   const selectedShape = useMemo(() => (interactiveSelectedIds.length === 1 ? shapes.find((shape) => shape.id === interactiveSelectedIds[0]) ?? null : null), [interactiveSelectedIds, shapes]);
   const clearSculptCursor = useCallback(() => {
+    if (sculptCursorFrameRef.current !== null) cancelAnimationFrame(sculptCursorFrameRef.current);
+    sculptCursorFrameRef.current = null;
+    sculptPointerRef.current = null;
     sculptCursorSourceRef.current = null;
     if (sculptCursorOverlayRef.current) {
       sculptCursorOverlayRef.current = null;
@@ -3105,7 +3118,8 @@ export function WorkplaneViewport({
 
   useEffect(() => {
     setSelectionHelpersVisible(threeRef.current, !workplaneMode && !sculptSettings && activeTransformKind !== "rotate");
-  }, [activeTransformKind, sculptSettings, workplaneMode]);
+    if (!sculptSettings) rebuildSelectionHelpers(threeRef.current, shapesRef.current, renderSelectionIds(), placementWorkplaneRef.current);
+  }, [activeTransformKind, renderSelectionIds, sculptSettings, workplaneMode]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -3116,6 +3130,7 @@ export function WorkplaneViewport({
     let state: ThreeState;
     try {
       state = createThreeScene(host);
+      state.sculptModeActive = Boolean(sculptSettingsRef.current);
       setRendererError(null);
     } catch {
       setRendererError("The 3D viewport needs WebGL. Enable browser hardware acceleration or use a browser/environment that permits WebGL, then retry.");
@@ -4300,7 +4315,11 @@ export function WorkplaneViewport({
     state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     state.raycaster.setFromCamera(state.pointer, state.camera);
     state.raycaster.layers.set(RENDER_LAYER_SHAPES);
-    const hit = state.raycaster.intersectObjects(state.shapeLayer.children, true).find((entry) => (
+    const target = findShapeObject(state, targetId);
+    if (!target) return null;
+    const surfaces: THREE.Object3D[] = [];
+    target.traverse((object) => { if (object instanceof THREE.Mesh && object.userData.shapeSurface) surfaces.push(object); });
+    const hit = state.raycaster.intersectObjects(surfaces, false).find((entry) => (
       entry.object instanceof THREE.Mesh && entry.object.userData.shapeId === targetId
     ));
     if (!hit?.face || !(hit.object instanceof THREE.Mesh)) return null;
@@ -4323,6 +4342,124 @@ export function WorkplaneViewport({
     sculptCursorSourceRef.current = source;
     syncSculptCursorOverlay(state, source, settings, sculptCursorOverlayRef, setSculptCursorOverlay);
   }, []);
+
+  const scheduleSculptCursor = useCallback((clientX: number, clientY: number) => {
+    sculptPointerRef.current = { clientX, clientY };
+    if (sculptCursorFrameRef.current !== null) return;
+    sculptCursorFrameRef.current = requestAnimationFrame(() => {
+      sculptCursorFrameRef.current = null;
+      const pointer = sculptPointerRef.current;
+      if (!pointer || !sculptSettingsRef.current) return;
+      const targetId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
+      const pick = targetId ? pickSculptHit(pointer.clientX, pointer.clientY, targetId) : null;
+      updateSculptCursor(pointer.clientX, pointer.clientY, pick);
+    });
+  }, [pickSculptHit, updateSculptCursor]);
+
+  useEffect(() => () => {
+    if (sculptCursorFrameRef.current !== null) cancelAnimationFrame(sculptCursorFrameRef.current);
+  }, []);
+
+  const stopSculptStroke = useCallback(() => {
+    const stroke = sculptStrokeRef.current;
+    if (!stroke) return;
+    sculptStrokeRef.current = null;
+    stroke.queue.cancel();
+    stroke.worker.terminate();
+    sculptDragRef.current = null;
+    if (threeRef.current) {
+      threeRef.current.controls.enabled = true;
+      threeRef.current.needsRender = true;
+    }
+    onInteractionActiveChange?.(false);
+  }, [onInteractionActiveChange]);
+
+  useEffect(() => () => stopSculptStroke(), [stopSculptStroke]);
+  useEffect(() => {
+    const stroke = sculptStrokeRef.current;
+    if (stroke && (!sculptSettings || selectedIds.length !== 1 || selectedIds[0] !== stroke.targetId)) stopSculptStroke();
+  }, [sculptSettings, selectedIds, stopSculptStroke]);
+
+  const startSculptStroke = useCallback((targetId: string) => {
+    if (sculptStrokeRef.current) return null;
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL("../workers/sculpt.worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      setSculptError("The sculpt worker could not start. Reload the editor and try again.");
+      return null;
+    }
+    setSculptError(null);
+    let initialized = false;
+    let workerShape: WorkplaneShape | null = null;
+    const queue = new SculptStroke<{ clientX: number; clientY: number }>(async (sample) => {
+      const shape = shapesRef.current.find((entry) => entry.id === targetId);
+      const settings = sculptSettingsRef.current;
+      if (!shape?.importedMesh || shape.locked || shape.hidden || !settings) return;
+      if (workerShape && (workerShape.importedMesh !== shape.importedMesh
+        || shapeTransformSignature(workerShape) !== shapeTransformSignature(shape))) {
+        stopSculptStroke();
+        return;
+      }
+      const pick = pickSculptHit(sample.clientX, sample.clientY, targetId);
+      updateSculptCursor(sample.clientX, sample.clientY, pick);
+      if (!pick) return;
+      const isCancelled = () => sculptStrokeRef.current?.queue !== queue;
+      let initialShape: SculptRequest["shape"];
+      if (!initialized) {
+        const { positions: sourcePositions, normals: _normals, ...mesh } = shape.importedMesh;
+        const positions = await copySculptNumbers(sourcePositions, new Float64Array(sourcePositions.length), isCancelled);
+        if (!positions) return;
+        initialShape = { x: shape.x, z: shape.z, elevation: shape.elevation, importedMesh: mesh, positions };
+      }
+      if (isCancelled()) return;
+      const response = await new Promise<SculptResponse>((resolve, reject) => {
+        worker.onmessage = (event: MessageEvent<SculptResponse>) => {
+          if ("error" in event.data) reject(new Error(event.data.error));
+          else resolve(event.data);
+        };
+        worker.onerror = (event) => { event.preventDefault(); reject(new Error("Sculpt worker failed")); };
+        worker.onmessageerror = () => reject(new Error("Sculpt worker returned an unreadable result"));
+        worker.postMessage({
+          shape: initialShape,
+          point: pick.point,
+          settings,
+        } satisfies SculptRequest, initialShape ? [initialShape.positions.buffer] : []);
+        initialized = true;
+        workerShape ??= shape;
+      });
+      if (isCancelled() || "error" in response || !response.patch) return;
+      // Project data remains ordinary precision-preserving arrays. Copy in small
+      // time slices so adapting transferred buffers cannot become a long task.
+      const positions = await copySculptNumbers(response.positions, new Array<number>(response.positions.length), isCancelled);
+      if (!positions) return;
+      const normals = response.normals
+        ? await copySculptNumbers(response.normals, new Array<number>(response.normals.length), isCancelled)
+        : undefined;
+      if (isCancelled()) return;
+      const current = shapesRef.current.find((entry) => entry.id === targetId);
+      // An undo, edit, or deletion during computation must win over a late dab.
+      if (!current || current.locked || current.hidden || current.importedMesh !== shape.importedMesh
+        || shapeTransformSignature(current) !== shapeTransformSignature(shape)) {
+        stopSculptStroke();
+        return;
+      }
+      const importedMesh = { ...response.mesh, positions, ...(normals ? { normals } : {}) };
+      // Seed the normal renderer cache with ready-to-upload geometry, outlines,
+      // and a ready-to-use picking tree, all prepared in the worker.
+      importedGeometryCache.set(importedMesh, restoreSculptGeometry(response.geometry));
+      const patch = { ...response.patch, importedMesh };
+      workerShape = { ...shape, ...patch };
+      shapesRef.current = shapesRef.current.map((entry) => entry.id === targetId ? { ...entry, ...patch } : entry);
+      onUpdateShape(targetId, patch);
+    }, (error) => {
+      if (sculptStrokeRef.current?.queue !== queue) return;
+      if (error) setSculptError("The brush could not finish this stroke. Try again with a smaller brush or a simpler mesh.");
+      stopSculptStroke();
+    });
+    sculptStrokeRef.current = { queue, worker, targetId };
+    return queue;
+  }, [onUpdateShape, pickSculptHit, stopSculptStroke, updateSculptCursor]);
 
   const pickPlacementSurface = useCallback((clientX: number, clientY: number, reverse: boolean) => {
     const state = threeRef.current;
@@ -4456,19 +4593,19 @@ export function WorkplaneViewport({
       const sculptTargetId = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
       if (activeSculpt && sculptTargetId) {
         event.preventDefault();
+        if (sculptStrokeRef.current) return;
         const pick = pickSculptHit(event.clientX, event.clientY, sculptTargetId);
         updateSculptCursor(event.clientX, event.clientY, pick);
         if (!pick) return;
         const shape = shapesRef.current.find((entry) => entry.id === sculptTargetId);
         if (!shape?.importedMesh || shape.locked) return;
-        const patch = sculptMeshAtPoint(shape, pick.point, activeSculpt);
-        if (!patch) return;
+        const queue = startSculptStroke(sculptTargetId);
+        if (!queue) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         sculptDragRef.current = { pointerId: event.pointerId, targetId: sculptTargetId };
         state.controls.enabled = false;
         onInteractionActiveChange?.(true);
-        shapesRef.current = shapesRef.current.map((entry) => entry.id === sculptTargetId ? { ...entry, ...patch } : entry);
-        onUpdateShape(sculptTargetId, patch);
+        queue.push({ clientX: event.clientX, clientY: event.clientY });
         return;
       }
 
@@ -4774,6 +4911,7 @@ export function WorkplaneViewport({
       onWorkplaneModeChange,
       pickPlacementSurface,
       pickSculptHit,
+      startSculptStroke,
       pickModifierEdge,
       pickShape,
       pickTransformHandle,
@@ -4794,16 +4932,12 @@ export function WorkplaneViewport({
       const sculptDrag = sculptDragRef.current;
       const activeSculpt = sculptSettingsRef.current;
       if (activeSculpt) {
-        const targetId = sculptDrag?.targetId ?? (selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null);
-        const pick = targetId ? pickSculptHit(event.clientX, event.clientY, targetId) : null;
-        updateSculptCursor(event.clientX, event.clientY, pick);
-        const shape = sculptDrag ? shapesRef.current.find((entry) => entry.id === sculptDrag.targetId) : null;
-        if (sculptDrag && pick && shape?.importedMesh) {
-          const patch = sculptMeshAtPoint(shape, pick.point, activeSculpt);
-          if (patch) {
-            shapesRef.current = shapesRef.current.map((entry) => entry.id === sculptDrag.targetId ? { ...entry, ...patch } : entry);
-            onUpdateShape(sculptDrag.targetId, patch);
+        scheduleSculptCursor(event.clientX, event.clientY);
+        if (sculptDrag) {
+          if (event.pointerId === sculptDrag.pointerId) {
+            sculptStrokeRef.current?.queue.push({ clientX: event.clientX, clientY: event.clientY });
           }
+          return;
         }
         return;
       }
@@ -4922,7 +5056,7 @@ export function WorkplaneViewport({
         threeRef.current.needsRender = true;
       }
     },
-    [onUpdateShape, pickPlacementSurface, pickSculptHit, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateSculptCursor, updateTransform],
+    [onUpdateShape, pickPlacementSurface, scheduleSculptCursor, setMarqueeFromState, toPlacementWorkplanePoint, toRawPlanePoint, updateModifierEdgeHover, updateRulerHover, updateTransform],
   );
 
   const handlePointerLeave = useCallback(() => {
@@ -4938,13 +5072,11 @@ export function WorkplaneViewport({
       const state = threeRef.current;
       const sculptDrag = sculptDragRef.current;
       if (sculptDrag) {
+        if (event.pointerId !== sculptDrag.pointerId) return;
         if (event.currentTarget.hasPointerCapture(sculptDrag.pointerId)) event.currentTarget.releasePointerCapture(sculptDrag.pointerId);
         sculptDragRef.current = null;
-        if (state) {
-          state.controls.enabled = true;
-          state.needsRender = true;
-        }
-        onInteractionActiveChange?.(false);
+        // Keep the history interaction open until the final worker result lands.
+        sculptStrokeRef.current?.queue.finish();
         return;
       }
       const transform = transformRef.current;
@@ -5464,6 +5596,12 @@ export function WorkplaneViewport({
           ) : null}
           {!workplaneMode && !splitActive && marqueeRect ? <div className="selection-marquee" style={marqueeRect} /> : null}
           {sculptSettings && sculptCursorOverlay ? <SculptCursorOverlay cursor={sculptCursorOverlay} /> : null}
+          {sculptSettings && sculptError ? (
+            <div role="status" className="workplane-renderer-error">
+              <span>{sculptError}</span>
+              <button type="button" onClick={() => setSculptError(null)}>Dismiss</button>
+            </div>
+          ) : null}
           {!workplaneMode && !splitActive && moveDimensionsEnabled && moveDimensionOverlay ? (
             <MoveDimensionOverlay
               overlay={moveDimensionOverlay}
@@ -5707,6 +5845,7 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
     moveDimensionLayer,
     modifierLayer,
     shapeRecords: new Map<string, ShapeRenderRecord>(),
+    sculptModeActive: false,
     officialShapeLayerActive: false,
     raycaster,
     pointer,
@@ -6399,6 +6538,7 @@ function clearCutPreviewOverlays(state: ThreeState) {
 function syncCutPreviewOverlays(state: ThreeState, shapes: WorkplaneShape[]) {
   clearCutPreviewOverlays(state);
   const visibleShapes = shapes.filter((shape) => !shape.hidden);
+  if (!visibleShapes.some((shape) => shape.hole)) return;
   const cutFrames = shapeCutPreviewFrames(state, visibleShapes);
   const solidFrames = visibleShapes
     .filter((shape) => !shape.hole)
@@ -6679,6 +6819,9 @@ function rebuildSelectionHelpers(
   }
 
   disposeChildren(state.helperLayer);
+  // These helpers are hidden in sculpt mode. Avoid projecting every imported
+  // vertex just to rebuild an invisible ground footprint after each dab.
+  if (state.sculptModeActive) return;
   selectedIds.forEach((id) => {
     const shape = shapes.find((entry) => entry.id === id && !entry.hidden);
     if (!shape) {
@@ -6694,6 +6837,7 @@ function rebuildSelectionHelpers(
 }
 
 function setSelectionHelpersVisible(state: ThreeState | null, visible: boolean) {
+  if (state?.sculptModeActive) visible = false;
   if (!state || state.helperLayer.visible === visible) {
     return;
   }
@@ -6822,7 +6966,7 @@ function syncTransformOverlay(
   workplane: PlacementWorkplane = horizontalPlacementWorkplane(),
   theme: ResolvedAppTheme = "light",
 ) {
-  if (selectedIds.length < 1) {
+  if (state.sculptModeActive || selectedIds.length < 1) {
     syncTransformGuideWorldLines(state, null, theme);
     if (overlayRef.current) {
       overlayRef.current = null;
@@ -7623,7 +7767,8 @@ function trimSharedShapeGeometryCache() {
   }
 }
 
-function retainSharedShapeGeometry(mesh: THREE.Mesh, geometry: THREE.BufferGeometry) {
+function retainSharedShapeGeometry(mesh: THREE.Mesh | THREE.LineSegments, geometry: THREE.BufferGeometry) {
+  retainSculptGeometry(geometry);
   const key = geometry.userData.sharedShapeGeometryKey as string | undefined;
   if (!key) return;
   const entry = sharedShapeGeometryCache.get(key);
@@ -7634,6 +7779,7 @@ function retainSharedShapeGeometry(mesh: THREE.Mesh, geometry: THREE.BufferGeome
 }
 
 function releaseSharedShapeGeometry(mesh: THREE.Mesh | THREE.LineSegments) {
+  releaseSculptGeometry(mesh.geometry);
   const key = mesh.userData.sharedShapeGeometryKey as string | undefined;
   if (!key) return;
   mesh.userData.sharedShapeGeometryKey = undefined;
@@ -8115,6 +8261,7 @@ function addShapeEdgeDecorations(group: THREE.Group, mesh: THREE.Mesh, prepared:
     } else {
       const selectedThreshold = shape.importedMesh ? NORMAL_IMPORTED_SELECTION_EDGE_ANGLE : 1;
       const edges = new THREE.LineSegments(getEdgesGeometry(shape, prepared, selectedOutline ? selectedThreshold : complexEdges ? 14 : 25), sharedLineMaterial(edgeColor, edgeOpacity));
+      retainSharedShapeGeometry(edges, edges.geometry);
       edges.userData.complexEdge = complexEdges;
       edges.userData.shapeDecoration = true;
       edges.userData.shapeEdge = true;
