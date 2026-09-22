@@ -17,8 +17,8 @@ project.skf
     ├── source/          Original imported 3MF, STL, SVG, or STEP files
     ├── derived-mesh/    Exact caches for baked operations or legacy imports
     ├── brep/            Exact STEP/B-Rep payloads
-    ├── image/           Deduplicated sketch/reference images
-    └── display-edges/   Shared CAD display-edge arrays (JSON)
+    ├── display-edges/   Deduplicated display-edge polylines of CAD objects
+    └── image/           Deduplicated sketch/reference images
 ```
 
 `project.json` contains these top-level sections:
@@ -38,6 +38,8 @@ project.skf
 Object nodes keep stable SketchForge object IDs. Groups refer to child node IDs instead of array positions. Fillet/chamfer history refers to explicit “before” nodes. Feature dependencies are explicit and checked for cycles.
 
 Nodes reference display edges through `cadDisplayEdgesAssetId`; the edge version remains in the shape definition. Each distinct edge array is stored once, including references from groups and reversible edge-treatment history. Mesh coordinate arrays, B-Rep strings, and image data URLs are encoded and hashed once per immutable resource. Weak caches and a bounded text cache reuse this work on subsequent saves. Import restores shared mesh and edge objects across undo states. Long node traversals yield to the event loop between batches.
+
+New display-edge assets use `SKFEDG1` little-endian binary: an 8-byte magic, the edge count, the total coordinate count, one 32-bit length per edge, then the coordinates as doubles. Earlier format-2 JSON edge assets with media type `application/vnd.sketchforge.display-edges+json` are also accepted.
 
 ## What is preserved
 
@@ -63,6 +65,8 @@ Current safety limits are 512 MB compressed, 1 GB expanded, 256 MB per asset, 64
 ## Compatibility and migrations
 
 New saves use format version 2 and minimum reader version 2. Older applications reject these files rather than dropping shared display edges. The current reader accepts version 1 packages with inline display edges, interns those resources on import, and writes version 2 on the next save. The importer also contains an explicit migration for the documented version 0 pure-JSON prototype and preserves its object IDs and valid history.
+
+The upstream binary edge encoding requires an updated reader even on forks that previously implemented format 2 using JSON edges. Use copies of projects when testing this build against such an older installation.
 
 Future schema changes should add a version-to-version migration, run validation after every migration, and never mutate the user's original file.
 

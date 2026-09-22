@@ -17,7 +17,7 @@ import {
   type SkfProjectExportInput,
 } from "@/lib/skfProject";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE } from "@/lib/workplaneSettings";
-import type { ShapeKind, WorkplaneShape } from "@/types/sketchforge";
+import type { CadDisplayEdge, ShapeKind, WorkplaneShape } from "@/types/sketchforge";
 
 function shape(kind: ShapeKind, id = `${kind}-1`, overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
   return {
@@ -39,6 +39,12 @@ function shape(kind: ShapeKind, id = `${kind}-1`, overrides: Partial<WorkplaneSh
     hidden: false,
     ...overrides,
   };
+}
+
+function displayEdges(count: number): CadDisplayEdge[] {
+  return Array.from({ length: count }, (_unused, index) => ({
+    points: [index, 0, 0, index, 5, 0, index, 5, 5],
+  }));
 }
 
 function input(shapes: WorkplaneShape[], overrides: Partial<SkfProjectExportInput> = {}): SkfProjectExportInput {
@@ -153,12 +159,47 @@ describe("SketchForge .skf project packages", () => {
     const bytes = await exportSkfProject(input([shape("box", "bad-edges", { cadDisplayEdges: [{ points: [0, 0, 0] }] })]));
     await expect(importSkfProject(mutateProject(bytes, (document) => {
       document.states[0].nodes[0].cadDisplayEdgesAssetId = "missing";
-    }))).rejects.toThrow(/display-edge asset/);
+    }))).rejects.toThrow(/display[- ]edge asset/);
     const { files, document } = packageDocument(bytes);
     const edge = document.assets.find((asset) => asset.kind === "display-edges")!;
+    edge.mediaType = "application/vnd.sketchforge.display-edges+json";
     files[edge.path] = strToU8('[{"points":["invalid",0,0]}]');
     edge.byteLength = files[edge.path].length;
     edge.sha256 = await projectAssets.sha256Hex(files[edge.path]);
+    files["project.json"] = strToU8(JSON.stringify(document));
+    await expect(importSkfProject(zipSync(files))).rejects.toThrow(/display-edge coordinates/);
+  });
+
+  it("reads this fork's JSON format-2 edge assets and upgrades them to shared binary assets", async () => {
+    const original = shape("box", "json-v2", { cadDisplayEdges: displayEdges(3), cadDisplayEdgesVersion: 2 });
+    const moved = { ...original, x: 25 };
+    const history = [editorHistoryEntry([original], []), editorHistoryEntry([moved], [moved.id])];
+    const { files, document } = packageDocument(await exportSkfProject(input([moved], { history, historyIndex: 1 })));
+    const edge = document.assets.find((asset) => asset.kind === "display-edges")!;
+    delete files[edge.path];
+    edge.path = edge.path.replace(/\.skfedges$/, ".json");
+    edge.mediaType = "application/vnd.sketchforge.display-edges+json";
+    files[edge.path] = strToU8(JSON.stringify(original.cadDisplayEdges));
+    edge.byteLength = files[edge.path].length;
+    edge.sha256 = await projectAssets.sha256Hex(files[edge.path]);
+    files["project.json"] = strToU8(JSON.stringify(document));
+    const restored = await importSkfProject(zipSync(files));
+    expect(restored.shapes[0].cadDisplayEdges).toEqual(original.cadDisplayEdges);
+    expect(restored.history[0].shapes[0].cadDisplayEdges).toBe(restored.history[1].shapes[0].cadDisplayEdges);
+    const saved = packageDocument(await exportSkfProject(input(restored.shapes, { history: restored.history, historyIndex: 1 })));
+    const binary = saved.document.assets.filter((asset) => asset.kind === "display-edges");
+    expect(binary).toHaveLength(1);
+    expect(binary[0].path).toMatch(/\.skfedges$/);
+    expect(strFromU8(saved.files[binary[0].path].subarray(0, 8))).toBe("SKFEDG1\0");
+  });
+
+  it("rejects malformed binary edge coordinates", async () => {
+    const original = shape("box", "binary-edges", { cadDisplayEdges: displayEdges(1) });
+    const { files, document } = packageDocument(await exportSkfProject(input([original])));
+    const edge = document.assets.find((asset) => asset.kind === "display-edges")!;
+    const bytes = files[edge.path];
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setFloat64(20, Number.NaN, true);
+    edge.sha256 = await projectAssets.sha256Hex(bytes);
     files["project.json"] = strToU8(JSON.stringify(document));
     await expect(importSkfProject(zipSync(files))).rejects.toThrow(/display-edge coordinates/);
   });
@@ -726,5 +767,77 @@ describe("SketchForge .skf project packages", () => {
     const asset = document.assets.find((entry) => entry.kind === "derived-mesh")!;
     files[asset.path][20] ^= 0xff;
     await expect(importSkfProject(zipSync(files))).rejects.toThrow("integrity check");
+  });
+
+  it("stores display edges once instead of repeating them in every undo state", async () => {
+    const edges = displayEdges(4);
+    const placed = shape("box", "cad-box", { cadDisplayEdges: edges, cadDisplayEdgesVersion: 2 });
+    const moved = { ...placed, x: placed.x + 5 };
+    const movedAgain = { ...moved, x: moved.x + 5 };
+    const history = [placed, moved, movedAgain].map((state) => editorHistoryEntry([state], []));
+
+    const exported = await exportSkfProject(input([movedAgain], { history, historyIndex: 2 }));
+    const { document } = packageDocument(exported);
+    const edgeAssets = document.assets.filter((entry) => entry.kind === "display-edges");
+
+    expect(document.states).toHaveLength(3);
+    expect(edgeAssets).toHaveLength(1);
+    document.states.forEach((state) => state.nodes.forEach((node) => {
+      expect(node.definition.cadDisplayEdges).toBeUndefined();
+      expect(node.cadDisplayEdgesAssetId).toBe(edgeAssets[0].id);
+    }));
+
+    const restored = await importSkfProject(exported);
+    expect(restored.shapes[0].cadDisplayEdges).toEqual(edges);
+    expect(restored.shapes[0].cadDisplayEdgesVersion).toBe(2);
+    expect(restored.history).toHaveLength(3);
+    restored.history.forEach((entry) => {
+      expect(entry.shapes[0].cadDisplayEdges).toBe(restored.shapes[0].cadDisplayEdges);
+    });
+  });
+
+  it("keeps an empty display edge list inline and restores it unchanged", async () => {
+    const exported = await exportSkfProject(input([shape("box", "cad-box", { cadDisplayEdges: [], cadDisplayEdgesVersion: 2 })]));
+    const { document } = packageDocument(exported);
+
+    expect(document.assets.filter((entry) => entry.kind === "display-edges")).toHaveLength(0);
+    expect((await importSkfProject(exported)).shapes[0].cadDisplayEdges).toEqual([]);
+  });
+
+  it("encodes and hashes unchanged resources only once across repeated saves", async () => {
+    const project = input([shape("box", "cad-box", { cadDisplayEdges: displayEdges(6), cadDisplayEdgesVersion: 2 })], {
+      assets: [await projectAssetFromBytes("cube.stl", "stl", strToU8("solid cube\nendsolid cube\n"))],
+    });
+    const meshed = shape("mesh", "baked", {
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 1,
+        baseDepth: 1,
+        baseHeight: 1,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+    });
+    const shapes = [...project.shapes, meshed];
+    const repeated = { ...project, shapes, history: [editorHistoryEntry(shapes, [])], historyIndex: 0 };
+
+    const first = await exportSkfProject(repeated);
+    const digest = vi.spyOn(globalThis.crypto.subtle, "digest");
+    try {
+      const second = await exportSkfProject(repeated);
+      expect(digest).not.toHaveBeenCalled();
+      expect(strFromU8(packageDocument(second).files["project.json"])).toBe(strFromU8(packageDocument(first).files["project.json"]));
+    } finally {
+      digest.mockRestore();
+    }
+  });
+
+  it("rejects a display edge reference that does not resolve to an edge asset", async () => {
+    const exported = await exportSkfProject(input([shape("box", "cad-box", { cadDisplayEdges: displayEdges(3), cadDisplayEdgesVersion: 2 })]));
+    const broken = mutateProject(exported, (document) => {
+      document.states[0].nodes[0].cadDisplayEdgesAssetId = "display-edges-missing";
+    });
+
+    await expect(importSkfProject(broken)).rejects.toThrow("missing display edge asset");
   });
 });

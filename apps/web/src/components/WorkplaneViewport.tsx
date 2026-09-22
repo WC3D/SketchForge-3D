@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Home, Minus, MousePointer2, PanelsTopLeft, Plus, Ruler, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Crosshair, Home, Minus, MousePointer2, PanelsTopLeft, Plus, Ruler, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type MutableRefObject, type PointerEvent as ReactPointerEvent, type SetStateAction, type WheelEvent as ReactWheelEvent } from "react";
 import * as THREE from "three";
 import { Brush, Evaluator, HOLLOW_INTERSECTION } from "three-bvh-csg";
@@ -27,6 +27,7 @@ import { WorkspaceSettingsModal } from "@/components/workplane/WorkspaceSettings
 import type { ResolvedAppTheme } from "@/lib/appTheme";
 import type { ChallengeTutorialId } from "@/lib/challenges";
 import { cadModifierPrimitiveForBakedShape, cadTransformFromMatrix, cadTransformToMatrix } from "@/lib/cadBakeMetadata";
+import { orthographicFramingZoom, perspectiveFramingDistance } from "@/lib/cameraFraming";
 import { createGearGeometry } from "@/lib/gearGeometry";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import type { ModelSplitPlane } from "@/lib/modelSplit";
@@ -50,14 +51,15 @@ import {
 } from "@/lib/placementWorkplane";
 import { regularPolygonFootprintScale } from "@/lib/regularPolygonFootprint";
 import { projectThumbnailDimensions } from "@/lib/projectThumbnail";
-import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, shapeDimensionLimit, workplaneSettingsFingerprint, workspaceHydrationRequired, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
-import { interiorWorkplaneGridCoordinates, workplaneThemePalette, WORKPLANE_LINE_ELEVATION, WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
+import { canBeginShapeDrag, DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, shapeDimensionLimit, snapGridStep as snapStep, workplaneSettingsFingerprint, workspaceHydrationRequired, workspaceHydrationSyncDecision } from "@/lib/workplaneSettings";
+import { interiorWorkplaneGridCoordinates, workplaneGridPalette, workplaneLabelLayout, workplaneThemePalette, WORKPLANE_LABEL_ASPECT, WORKPLANE_LABEL_TEXT, WORKPLANE_LINE_ELEVATION, WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
 import { cleanNearZero, cleanRotationDegrees, fallbackSolidColor, mirroredAxisCount, mirrorSign, preservesEdgeTreatmentSize, proportionalResizeScale, resizedImportedCoordinates, resizedImportedMeshPositions, resizedShapeSize, shapeDepth, shapeHasTaper, shapeOverallFootprintDimensions, shapeTaperDimensions, shapeTaperScaleAt, shapeWidth } from "@/lib/workplaneShapes";
 import { sphereTessellation } from "@/lib/sphereTessellation";
 import type { SketchForgeMcpViewFace } from "@/lib/sketchforgeMcpProtocol";
 import {
   TransformOverlay,
   continuousSnappedWheelRotation,
+  dimensionMarkScreenPush,
   getElevationMeasureKey,
   isPointInsideTransformBounds,
   measureKeyForHandle,
@@ -554,16 +556,6 @@ function shouldBuildCutPreviews(transform: TransformDragState | null, drag: Drag
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
-}
-
-function snapStep(size: GridSize) {
-  if (size === "Off") {
-    return 0;
-  }
-  if (size === "Brick") {
-    return 8;
-  }
-  return Number.parseFloat(size) || 1;
 }
 
 function snapValue(value: number, step: number) {
@@ -2807,6 +2799,23 @@ export function WorkplaneViewport({
     lastWorkspaceSettingsSyncRef.current = fingerprint;
     onWorkspaceSettingsChange?.({ workspace: normalizedWorkspace, snap: normalizedSnap });
   }, [onWorkspaceSettingsChange, snap, workspace]);
+
+  /**
+   * Snap grid picked from a control, as opposed to hydrated from the project.
+   *
+   * The effect above suppresses one sync after hydration so the freshly loaded
+   * settings are not echoed straight back. On mount that suppression is armed
+   * but never spent, because `snap` is already seeded from `initialSnap` and
+   * hydration therefore changes no state and never triggers the effect. The
+   * first choice a user made was swallowed with it, leaving the editor — and
+   * the project file — on the previous grid until some unrelated change
+   * happened to clear the guard. A choice is never a hydration echo, so
+   * disarm the guard before recording it.
+   */
+  const chooseSnapGrid = useCallback<Dispatch<SetStateAction<GridSize>>>((value) => {
+    pendingWorkspaceHydrationFingerprintRef.current = null;
+    setSnap(value);
+  }, []);
 
   const makeWorkspaceDefault = useCallback(() => {
     const normalizedWorkspace = normalizeWorkspaceSettings(workspace);
@@ -5212,6 +5221,48 @@ export function WorkplaneViewport({
     [onAddShape, toPlacementWorkplanePoint],
   );
 
+  const focusSelection = useCallback(() => {
+    const state = threeRef.current;
+    if (!state) return;
+    // The real selection, not renderSelectionIds: the workplane and edge tools hide
+    // the outline while they are open, but the objects are still what to look at.
+    const bounds = new THREE.Box3();
+    selectedIdsRef.current.forEach((id) => {
+      const record = state.shapeRecords.get(id);
+      if (record) bounds.expandByObject(record.object);
+    });
+    if (bounds.isEmpty()) return;
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(bounds.getSize(new THREE.Vector3()).length() / 2, 0.5);
+    const canvas = state.renderer.domElement;
+    const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+    const offset = state.camera.position.clone().sub(state.controls.target);
+    const direction = offset.lengthSq() > 0
+      ? offset.clone().normalize()
+      : CAMERA_HOME.clone().sub(CAMERA_TARGET).normalize();
+
+    if (state.camera instanceof THREE.OrthographicCamera) {
+      const halfHeight = Math.max(0.001, (state.camera.top - state.camera.bottom) / 2);
+      const zoom = orthographicFramingZoom(radius, halfHeight, aspect);
+      if (zoom) state.camera.zoom = clamp(zoom, 0.02, 100);
+      state.camera.position.copy(center).add(direction.multiplyScalar(clamp(offset.length(), 22, 4200)));
+    } else {
+      const distance = clamp(perspectiveFramingDistance(radius, CAMERA_FOV, aspect), 22, 4200);
+      state.camera.position.copy(center).add(direction.multiplyScalar(distance));
+    }
+
+    // constrainCamera keeps the orbit target inside the workspace on every frame,
+    // so an object parked beyond the plate edge is framed as closely as the
+    // existing camera limits allow rather than pulling the view off the grid.
+    state.controls.target.copy(center);
+    state.camera.lookAt(center);
+    state.camera.updateProjectionMatrix();
+    state.controls.update();
+    syncViewCube(state, viewCubeRef.current);
+    state.needsRender = true;
+  }, []);
+
   const resetView = useCallback(() => {
     const state = threeRef.current;
     if (state) {
@@ -5478,6 +5529,9 @@ export function WorkplaneViewport({
         if (!event.shiftKey || !setPlacementWorkplaneAtSelection()) {
           togglePlacementWorkplane();
         }
+      } else if (key === "f" && event.shiftKey) {
+        event.preventDefault();
+        focusSelection();
       } else if (key === "f" || event.key === "Home") {
         event.preventDefault();
         resetView();
@@ -5495,7 +5549,7 @@ export function WorkplaneViewport({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onWorkplaneModeChange, resetView, rulerToolsOpen, setPlacementWorkplaneAtSelection, setRulerActive, setViewCubeFace, togglePlacementWorkplane, toggleProjection, zoomCamera]);
+  }, [focusSelection, onWorkplaneModeChange, resetView, rulerToolsOpen, setPlacementWorkplaneAtSelection, setRulerActive, setViewCubeFace, togglePlacementWorkplane, toggleProjection, zoomCamera]);
 
   return (
     <main className={`workplane-stage ${challengeTutorial ? `key-tag-tutorial-active ${challengeTutorialCollapsed ? "key-tag-tutorial-collapsed" : ""}` : ""}`}>
@@ -5522,6 +5576,15 @@ export function WorkplaneViewport({
             </button>
             <button aria-label="Home" onClick={resetView}>
               <Home size={24} strokeWidth={2.25} />
+            </button>
+            <button
+              aria-label="Center view on selection"
+              aria-keyshortcuts="Shift+F"
+              title="Center view on selection (Shift+F)"
+              disabled={selectedIds.length === 0}
+              onClick={focusSelection}
+            >
+              <Crosshair size={24} strokeWidth={2.25} />
             </button>
             <button aria-label="Zoom in" onClick={() => zoomCamera(0.7)}>
               <Plus size={28} strokeWidth={2.15} />
@@ -5667,7 +5730,7 @@ export function WorkplaneViewport({
             clearMoveDimensions();
             onUpdateShape(selectedShape.id, patchWithResizeAnchor(selectedShape, patch, options?.resizeAxis, lastResizeAnchorRef.current));
           }}
-          onSnapChange={setSnap}
+          onSnapChange={chooseSnapGrid}
           onSnapOpenChange={setSnapOpen}
           onEditSketch={selectedShape.sketchProfile ? onEditSketch : undefined}
           canSeparateParts={canSeparateParts}
@@ -5680,7 +5743,7 @@ export function WorkplaneViewport({
 
       {!selectedShape ? (
         <div className="grid-settings">
-          <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={setSnap} onSnapOpenChange={setSnapOpen} />
+          <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={chooseSnapGrid} onSnapOpenChange={setSnapOpen} />
         </div>
       ) : null}
 
@@ -5691,7 +5754,7 @@ export function WorkplaneViewport({
           moveDimensionsEnabled={moveDimensionsEnabled}
           showProjectNameInToolbar={showProjectNameInToolbar}
           onWorkspaceChange={setWorkspace}
-          onSnapChange={setSnap}
+          onSnapChange={chooseSnapGrid}
           onMoveDimensionsEnabledChange={changeMoveDimensionsEnabled}
           onShowProjectNameInToolbarChange={onShowProjectNameInToolbarChange}
           onMakeDefault={makeWorkspaceDefault}
@@ -6157,16 +6220,27 @@ function rebuildWorkplane(
     surface.receiveShadow = workspace.showShadows && !muted;
     group.add(surface);
 
+    const lineColor = muted ? theme === "dark" ? "#76828a" : "#99a3aa" : workspace.gridColor;
     if (workspace.showGrid) {
       const grid = createGridLines(
         workspace.width,
         workspace.depth,
         workspace.gridBlockSize,
         theme,
-        muted ? theme === "dark" ? "#76828a" : "#99a3aa" : workspace.gridColor,
+        lineColor,
       );
       grid.name = "GridLines";
       group.add(grid);
+    }
+    const labelPalette = workplaneGridPalette(theme, lineColor).major;
+    const label = createWorkplaneLabel(
+      workspace.width,
+      workspace.depth,
+      labelPalette.color,
+      muted ? labelPalette.opacity * 0.5 : labelPalette.opacity,
+    );
+    if (label) {
+      group.add(label);
     }
     if (showMarker) {
       const markerMaterial = new THREE.MeshBasicMaterial({
@@ -6291,6 +6365,64 @@ function syncWorkplaneHoverPreview(
   setObjectRenderLayer(layer, RENDER_LAYER_PREVIEWS);
   layer.updateMatrixWorld(true);
   state.needsRender = true;
+}
+
+const WORKPLANE_LABEL_TEXTURE_WIDTH = 1024;
+const WORKPLANE_LABEL_FONT_STACK = '"Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif';
+
+/**
+ * Flat label along the near edge of a workplane, so its orientation is
+ * readable at a glance instead of having to be inferred from the axis lines.
+ *
+ * Drawn into a canvas rather than built from glyph geometry: it is a single
+ * static string that never needs to be a solid, and a texture costs one quad.
+ */
+function createWorkplaneLabel(width: number, depth: number, color: string, opacity: number) {
+  const layout = workplaneLabelLayout(width, depth);
+  if (layout.width <= 0 || layout.height <= 0) {
+    return null;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = WORKPLANE_LABEL_TEXTURE_WIDTH;
+  canvas.height = Math.round(WORKPLANE_LABEL_TEXTURE_WIDTH / WORKPLANE_LABEL_ASPECT);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return null;
+  }
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = color;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.font = `600 ${Math.round(canvas.height * 0.68)}px ${WORKPLANE_LABEL_FONT_STACK}`;
+  context.fillText(WORKPLANE_LABEL_TEXT, canvas.width / 2, canvas.height / 2, canvas.width * 0.94);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+
+  const label = new THREE.Mesh(
+    new THREE.PlaneGeometry(layout.width, layout.height),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity,
+      // Sits on the plane it belongs to, but must never hide a model standing
+      // on that plane, so it writes no depth and still tests against it.
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }),
+  );
+  label.name = "WorkplaneLabel";
+  // Lies flat, reading along +x with its top towards the far edge, which is
+  // upright from the default camera, and tucked into the near left corner.
+  label.rotation.x = -Math.PI / 2;
+  label.position.set(layout.lateralOffset, WORKPLANE_LINE_ELEVATION + 0.01, layout.depthOffset);
+  label.renderOrder = 2;
+  return label;
 }
 
 function createGridLines(
@@ -6872,32 +7004,37 @@ function makeDimensionMark(
   const railTo = project(toWorld.clone().add(outwardAxis.clone().multiplyScalar(railOffset)));
   const extensionFrom = project(fromWorld.clone().add(outwardAxis.clone().multiplyScalar(railOffset + extensionOverrun)));
   const extensionTo = project(toWorld.clone().add(outwardAxis.clone().multiplyScalar(railOffset + extensionOverrun)));
+  const edgeMidpoint = project(fromWorld.clone().lerp(toWorld, 0.5));
   const labelPoint = project(
     fromWorld
       .clone()
       .lerp(toWorld, 0.5)
       .add(outwardAxis.clone().multiplyScalar(railOffset + labelOffset)),
   );
+  // The world offset above shrinks to a few pixels when zoomed out, which puts
+  // the label under a rotate handle. Lift the whole mark together so the label
+  // keeps its distance without tearing away from its own rail.
+  const push = dimensionMarkScreenPush(edgeMidpoint, labelPoint);
 
   return {
     key,
     handleKey,
     axis,
     label,
-    x1: railFrom.x,
-    y1: railFrom.y,
-    x2: railTo.x,
-    y2: railTo.y,
+    x1: railFrom.x + push.x,
+    y1: railFrom.y + push.y,
+    x2: railTo.x + push.x,
+    y2: railTo.y + push.y,
     e1x1: from.x,
     e1y1: from.y,
-    e1x2: extensionFrom.x,
-    e1y2: extensionFrom.y,
+    e1x2: extensionFrom.x + push.x,
+    e1y2: extensionFrom.y + push.y,
     e2x1: to.x,
     e2y1: to.y,
-    e2x2: extensionTo.x,
-    e2y2: extensionTo.y,
-    labelX: labelPoint.x,
-    labelY: labelPoint.y,
+    e2x2: extensionTo.x + push.x,
+    e2y2: extensionTo.y + push.y,
+    labelX: labelPoint.x + push.x,
+    labelY: labelPoint.y + push.y,
   };
 }
 
