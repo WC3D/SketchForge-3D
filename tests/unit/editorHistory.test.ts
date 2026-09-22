@@ -113,6 +113,32 @@ describe("editor history snapshots", () => {
       .not.toBe(immutableResourceFingerprint(resource));
   });
 
+  it("reuses geometry signatures inside newly restored edge-treatment history wrappers", () => {
+    let coordinateReads = 0;
+    const points = new Proxy([0, 0, 0, 1, 2, 3], {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property)) coordinateReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const before = box({ cadDisplayEdges: [{ points }] });
+    const entry = { id: "fillet-before", createdAt: 123, feature: { kind: "fillet" as const, amount: 1, edgeCount: 1 }, before };
+    const baseline = projectShapesFingerprint([box({ edgeTreatmentHistory: [entry] })]);
+    expect(coordinateReads).toBeGreaterThan(0);
+    coordinateReads = 0;
+    expect(projectShapesFingerprint([box({ edgeTreatmentHistory: [{ ...entry, before: { ...before } }] })])).toBe(baseline);
+    expect(coordinateReads).toBe(0);
+    expect(projectShapesFingerprint([box({ edgeTreatmentHistory: [{ ...entry, before: { ...before, x: 5 } }] })])).not.toBe(baseline);
+  });
+
+  it("preserves normalized reversible-history references across transform snapshots", () => {
+    const original = editorHistoryEntry([box({ edgeTreatmentHistory: [{
+      id: "edge-before", createdAt: 123, feature: { kind: "fillet", amount: 1, edgeCount: 1 }, before: box(),
+    }] })], []);
+    const moved = editorHistoryEntry([{ ...original.shapes[0], x: 5 }], []);
+    expect(moved.shapes[0].edgeTreatmentHistory).toBe(original.shapes[0].edgeTreatmentHistory);
+  });
+
   it("falls back to direct field hashing when serialization exceeds the string limit", () => {
     const resource = {
       positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],

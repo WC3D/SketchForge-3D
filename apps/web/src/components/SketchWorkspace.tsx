@@ -7,6 +7,7 @@ import { SketchRevolvePreview } from "@/components/SketchRevolvePreview";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import { WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
 import { closestPointOnSketchSegment, type SketchSegmentPlacement } from "@/lib/sketchPointRefinement";
+import { isSketchPanGesture } from "@/lib/sketchPointerControls";
 import { mirrorSign, resizedImportedMeshPositions } from "@/lib/workplaneShapes";
 import { circleFromPoints } from "@/lib/sketchCircles";
 import { moveConstrainedSketchPoint } from "@/lib/sketchConstraints";
@@ -820,7 +821,10 @@ export function SketchWorkspace({
     setPointerAction({ kind: "pan", pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY });
   };
 
-  const isPanGesture = (event: ReactPointerEvent<SVGElement>) => event.button === 1 || (event.button === 0 && (event.ctrlKey || event.metaKey));
+  const isPanGesture = isSketchPanGesture;
+  const handlePanPointerDownCapture = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (isSketchPanGesture(event)) beginPan(event);
+  };
 
   const handlePlanePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (isPanGesture(event)) {
@@ -980,7 +984,7 @@ export function SketchWorkspace({
     minZ: selectedImage.z - selectedImage.depth / 2,
     maxZ: selectedImage.z + selectedImage.depth / 2,
   } : null;
-  const imageResizeHandles: Array<{ id: ResizeHandle; x: number; z: number }> = selectedImage && selectedImageBounds ? [
+  const imageResizeHandles: Array<{ id: ResizeHandle; x: number; z: number }> = selectedImage && selectedImageBounds && !selectedImage.locked ? [
     { id: "nw", x: selectedImageBounds.minX, z: selectedImageBounds.minZ },
     { id: "n", x: selectedImage.x, z: selectedImageBounds.minZ },
     { id: "ne", x: selectedImageBounds.maxX, z: selectedImageBounds.minZ },
@@ -992,13 +996,9 @@ export function SketchWorkspace({
   ] : [];
   const selectionResizeHandles: Array<{ id: ResizeHandle; x: number; z: number }> = selectedGeometryBounds ? [
     { id: "nw", x: selectedGeometryBounds.minX, z: selectedGeometryBounds.minZ },
-    { id: "n", x: selectedGeometryBounds.cx, z: selectedGeometryBounds.minZ },
     { id: "ne", x: selectedGeometryBounds.maxX, z: selectedGeometryBounds.minZ },
-    { id: "e", x: selectedGeometryBounds.maxX, z: selectedGeometryBounds.cz },
     { id: "se", x: selectedGeometryBounds.maxX, z: selectedGeometryBounds.maxZ },
-    { id: "s", x: selectedGeometryBounds.cx, z: selectedGeometryBounds.maxZ },
     { id: "sw", x: selectedGeometryBounds.minX, z: selectedGeometryBounds.maxZ },
-    { id: "w", x: selectedGeometryBounds.minX, z: selectedGeometryBounds.cz },
   ] : [];
   const referenceFootprints = useMemo(
     () => new Map(referenceShapes.map((shape) => [shape.id, importedMeshFootprint(shape)])),
@@ -1033,6 +1033,7 @@ export function SketchWorkspace({
           className={`sketch-plate tool-${tool} ${pointerAction?.kind === "pan" ? "panning" : ""}`}
           viewBox={`${pan.x - width / 2} ${pan.z - depth / 2} ${width} ${depth}`}
           preserveAspectRatio="xMidYMid meet"
+          onPointerDownCapture={handlePanPointerDownCapture}
           onPointerDown={handlePlanePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={finishPointerAction}
@@ -1074,6 +1075,7 @@ export function SketchWorkspace({
               <image
                 key={image.id}
                 data-sketch-entity="image"
+                className={image.locked ? "locked" : undefined}
                 aria-label={image.name}
                 href={image.dataUrl}
                 x={image.x - image.width / 2}
@@ -1091,9 +1093,10 @@ export function SketchWorkspace({
                     return;
                   }
                   if (event.button !== 0 || tool !== "select") return;
+                  onSelectImage(image.id);
+                  if (image.locked) return;
                   const point = pointFromEvent(event, false);
                   if (!point) return;
-                  onSelectImage(image.id);
                   beginEntityDrag(event, {
                     kind: "move-image",
                     pointerId: event.pointerId,
@@ -1984,7 +1987,16 @@ function SketchImageInspector({
         </button>
         <strong>{image.name}</strong>
         <div className="inspector-header-actions">
-          <button className="inspector-header-icon danger" type="button" aria-label="Delete sketch image" title="Delete image" onClick={onDelete}>
+          <button
+            className={image.locked ? "inspector-header-icon active" : "inspector-header-icon"}
+            type="button"
+            aria-label={image.locked ? "Unlock sketch image" : "Lock sketch image"}
+            title={`${image.locked ? "Unlock" : "Lock"} image (L)`}
+            onClick={() => onUpdate({ locked: !image.locked }, image.locked ? "Sketch image unlocked" : "Sketch image locked")}
+          >
+            {image.locked ? <LockKeyhole size={25} strokeWidth={2.2} /> : <LockKeyholeOpen size={25} strokeWidth={2.2} />}
+          </button>
+          <button className="inspector-header-icon danger" type="button" aria-label="Delete sketch image" title={image.locked ? "Unlock image before deleting" : "Delete image"} onClick={onDelete} disabled={image.locked}>
             <Trash2 size={25} strokeWidth={2.2} />
           </button>
         </div>
@@ -1996,12 +2008,12 @@ function SketchImageInspector({
       <div className="property-card">
         <div className="property-card-header static"><span>Properties</span></div>
         <div className="property-list">
-          <SketchImageRange label="Width" value={image.width} min={0.5} max={200} accuracy={accuracy} onChange={updateWidth} />
-          <SketchImageRange label="Height" value={image.depth} min={0.5} max={200} accuracy={accuracy} onChange={updateDepth} />
-          <SketchImageRange label="Opacity" value={(image.opacity ?? 0.55) * 100} min={5} max={100} accuracy={1} suffix="%" onChange={(opacity) => onUpdate({ opacity: opacity / 100 }, "Sketch image opacity updated")} />
-          <SketchImagePositionField label="Position X" value={image.x} accuracy={accuracy} onChange={(x) => onUpdate({ x }, "Sketch image moved")} />
-          <SketchImagePositionField label="Position Y" value={image.z} accuracy={accuracy} onChange={(z) => onUpdate({ z }, "Sketch image moved")} />
-          <button className={`sketch-image-aspect-toggle ${image.lockAspect !== false ? "active" : ""}`} type="button" onClick={() => onUpdate({ lockAspect: image.lockAspect === false }, "Image aspect ratio setting updated")}>
+          <SketchImageRange label="Width" value={image.width} min={0.5} max={200} accuracy={accuracy} disabled={image.locked} onChange={updateWidth} />
+          <SketchImageRange label="Height" value={image.depth} min={0.5} max={200} accuracy={accuracy} disabled={image.locked} onChange={updateDepth} />
+          <SketchImageRange label="Opacity" value={(image.opacity ?? 0.55) * 100} min={5} max={100} accuracy={1} suffix="%" disabled={image.locked} onChange={(opacity) => onUpdate({ opacity: opacity / 100 }, "Sketch image opacity updated")} />
+          <SketchImagePositionField label="Position X" value={image.x} accuracy={accuracy} disabled={image.locked} onChange={(x) => onUpdate({ x }, "Sketch image moved")} />
+          <SketchImagePositionField label="Position Y" value={image.z} accuracy={accuracy} disabled={image.locked} onChange={(z) => onUpdate({ z }, "Sketch image moved")} />
+          <button className={`sketch-image-aspect-toggle ${image.lockAspect !== false ? "active" : ""}`} type="button" disabled={image.locked} onClick={() => onUpdate({ lockAspect: image.lockAspect === false }, "Image aspect ratio setting updated")}>
             {image.lockAspect !== false ? <Link size={17} /> : <Link2Off size={17} />}
             <span>{image.lockAspect !== false ? "Aspect ratio locked" : "Aspect ratio unlocked"}</span>
           </button>
@@ -2018,6 +2030,7 @@ function SketchImageRange({
   max,
   accuracy,
   suffix = "mm",
+  disabled = false,
   onChange,
 }: {
   label: string;
@@ -2026,6 +2039,7 @@ function SketchImageRange({
   max: number;
   accuracy: 1 | 2 | 3;
   suffix?: string;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   const safeValue = clamp(Number.isFinite(value) ? value : min, min, max);
@@ -2045,13 +2059,14 @@ function SketchImageRange({
           type="text"
           inputMode="decimal"
           value={draft}
+          disabled={disabled}
           onChange={(event) => setDraft(event.currentTarget.value)}
           onBlur={commit}
           onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
         />
         <span>{suffix}</span>
       </div>
-      <input type="range" min={min} max={max} step={accuracy === 1 ? 0.1 : 0.01} value={safeValue} onChange={(event) => onChange(Number(event.currentTarget.value))} />
+      <input type="range" min={min} max={max} step={accuracy === 1 ? 0.1 : 0.01} value={safeValue} disabled={disabled} onChange={(event) => onChange(Number(event.currentTarget.value))} />
     </label>
   );
 }
@@ -2060,11 +2075,13 @@ function SketchImagePositionField({
   label,
   value,
   accuracy,
+  disabled = false,
   onChange,
 }: {
   label: string;
   value: number;
   accuracy: 1 | 2 | 3;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   const formatted = formatDimension(value, accuracy);
@@ -2084,6 +2101,7 @@ function SketchImagePositionField({
         type="text"
         inputMode="decimal"
         value={draft}
+        disabled={disabled}
         onChange={(event) => setDraft(event.currentTarget.value)}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}

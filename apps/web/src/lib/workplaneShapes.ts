@@ -22,6 +22,10 @@ export function cleanNearZero(value: number, epsilon = 0.005) {
   return Math.abs(value) < epsilon ? 0 : value;
 }
 
+export function shapeTransformShouldRemainEditable(shape: WorkplaneShape) {
+  return shape.kind === "text" || Boolean(shape.groupedShapes?.length);
+}
+
 export function cloneWorkplaneShapeTreeWithFreshIds(shape: WorkplaneShape, suffix: string): WorkplaneShape {
   return {
     ...shape,
@@ -212,16 +216,28 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
     mirrorZ: shape.mirrorZ || undefined,
   };
   if (shape.groupedShapes) {
-    next.groupedShapes = shape.groupedShapes.map(canonicalizeShape);
+    const children = shape.groupedShapes.map(canonicalizeShape);
+    next.groupedShapes = children.every((child, index) => child === shape.groupedShapes![index]) ? shape.groupedShapes : children;
+  }
+  if (shape.sketchRevolve) {
+    next.sketchRevolve = {
+      startAngle: shape.sketchRevolve.startAngle,
+      sweepAngle: shape.sketchRevolve.sweepAngle,
+      sides: shape.sketchRevolve.sides,
+      quality: shape.sketchRevolve.quality,
+    };
+    if (Object.keys(shape.sketchRevolve).every((key) => key in next.sketchRevolve!)) next.sketchRevolve = shape.sketchRevolve;
   }
   if (shape.edgeTreatmentHistory) {
-    next.edgeTreatmentHistory = shape.edgeTreatmentHistory.map((entry) => ({
-      ...entry,
-      before: canonicalizeShape(entry.before),
-    }));
+    const history = shape.edgeTreatmentHistory.map((entry) => {
+      const before = canonicalizeShape(entry.before);
+      return before === entry.before ? entry : { ...entry, before };
+    });
+    next.edgeTreatmentHistory = history.every((entry, index) => entry === shape.edgeTreatmentHistory![index]) ? shape.edgeTreatmentHistory : history;
   }
   if (shape.sculptSource) next.sculptSource = canonicalizeShape(shape.sculptSource);
-  return next;
+  // Preserve immutable resource identity when normalization has nothing to do.
+  return (Object.keys(next) as Array<keyof WorkplaneShape>).every((key) => next[key] === shape[key]) ? shape : next;
 }
 
 export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
