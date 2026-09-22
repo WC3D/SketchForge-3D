@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { editorHistoryEntry } from "@/lib/editorHistory";
-import { compactProjectShapeState, hydrateProjectShapeState } from "@/lib/projectShapePersistence";
+import { compactProjectShapeState, hydrateProjectShapeState, reconcileLoadedProjectShapeCacheEntry } from "@/lib/projectShapePersistence";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
 function importedShape(): WorkplaneShape {
@@ -30,6 +30,27 @@ function importedShape(): WorkplaneShape {
 }
 
 describe("project shape persistence resources", () => {
+  it("preserves a newer live cache entry when an older IndexedDB read finishes late", () => {
+    const live = { revision: 20, shapes: [importedShape()] };
+    const staleLoaded = { revision: 30, shapes: [] as WorkplaneShape[] };
+
+    const reconciled = reconcileLoadedProjectShapeCacheEntry(live, staleLoaded, 10);
+
+    expect(reconciled.revision).toBe(30);
+    expect(reconciled.shapes).toHaveLength(1);
+    expect(reconciled.shapes[0]?.id).toBe("mesh-1");
+  });
+
+  it("accepts persisted shapes when the IndexedDB record is newer than the live cache", () => {
+    const live = { revision: 20, shapes: [] as WorkplaneShape[] };
+    const loaded = { revision: 40, shapes: [importedShape()] };
+
+    const reconciled = reconcileLoadedProjectShapeCacheEntry(live, loaded, 40);
+
+    expect(reconciled).toBe(loaded);
+    expect(reconciled.shapes[0]?.id).toBe("mesh-1");
+  });
+
   it("stores one immutable mesh resource across current shapes and history", () => {
     const mesh = importedShape();
     const group: WorkplaneShape = {
@@ -66,5 +87,25 @@ describe("project shape persistence resources", () => {
     expect(currentMesh?.normals).toEqual(mesh.importedMesh?.normals);
     expect(currentMesh?.storageResourceId).toBeUndefined();
     expect(historyMesh).toBe(currentMesh);
+  });
+
+  it("compacts and hydrates pre-sculpt source meshes", () => {
+    const source = importedShape();
+    const sculpted: WorkplaneShape = {
+      ...source,
+      id: "sculpted-1",
+      sculpted: true,
+      sculptSource: source,
+      disabledFeatures: ["sculpt"],
+      importedMesh: { ...source.importedMesh!, positions: [0, 0, 0, 2, 0, 0, 0, 2, 0], sourceFormat: "json" },
+    };
+
+    const compact = compactProjectShapeState([sculpted], []);
+    expect(compact.shapes[0].sculptSource?.importedMesh?.positions).toEqual([]);
+    expect(compact.resources.size).toBe(2);
+
+    const hydrated = hydrateProjectShapeState(compact.shapes, [], compact.resources).shapes[0];
+    expect(hydrated.disabledFeatures).toEqual(["sculpt"]);
+    expect(hydrated.sculptSource?.importedMesh?.positions).toEqual(source.importedMesh?.positions);
   });
 });

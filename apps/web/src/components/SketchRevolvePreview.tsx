@@ -76,7 +76,7 @@ export function SketchRevolvePreview({ positions }: { positions: number[] | null
   return (
     <aside className="sketch-revolve-preview" aria-label="Revolve 3D preview">
       <div className="sketch-revolve-preview-title">3D preview</div>
-      {positions?.length && !rendererUnavailable ? <canvas ref={canvasRef} /> : <div className="sketch-revolve-preview-empty">{rendererUnavailable ? "3D preview unavailable because WebGL is disabled" : "Draw a profile left of the axis"}</div>}
+      {positions?.length && !rendererUnavailable ? <canvas ref={canvasRef} /> : <div className="sketch-revolve-preview-empty">{rendererUnavailable ? "3D preview unavailable because WebGL is disabled" : "Draw a closed profile left of the axis"}</div>}
     </aside>
   );
 }

@@ -22,11 +22,16 @@ export function cleanNearZero(value: number, epsilon = 0.005) {
   return Math.abs(value) < epsilon ? 0 : value;
 }
 
+export function shapeTransformShouldRemainEditable(shape: WorkplaneShape) {
+  return shape.kind === "text" || Boolean(shape.groupedShapes?.length);
+}
+
 export function cloneWorkplaneShapeTreeWithFreshIds(shape: WorkplaneShape, suffix: string): WorkplaneShape {
   return {
     ...shape,
     id: createLocalId(`${shape.id}-${suffix}`),
     groupedShapes: shape.groupedShapes?.map((child) => cloneWorkplaneShapeTreeWithFreshIds(child, suffix)),
+    sculptSource: shape.sculptSource ? cloneWorkplaneShapeTreeWithFreshIds(shape.sculptSource, suffix) : undefined,
   };
 }
 
@@ -36,6 +41,56 @@ export function shapeWidth(shape: WorkplaneShape) {
 
 export function shapeDepth(shape: WorkplaneShape) {
   return shape.depth ?? shape.size;
+}
+
+export function normalizeTaperScale(value?: number) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(3, Math.max(0.05, value as number));
+}
+
+function positiveTaperDimension(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0.01, value as number);
+}
+
+export function shapeTaperDimensions(shape: WorkplaneShape) {
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  return {
+    topWidth: positiveTaperDimension(shape.taperTopWidth, width * normalizeTaperScale(shape.taperTopScale)),
+    topDepth: positiveTaperDimension(shape.taperTopDepth, depth * normalizeTaperScale(shape.taperTopScale)),
+    bottomWidth: positiveTaperDimension(shape.taperBottomWidth, width * normalizeTaperScale(shape.taperBottomScale)),
+    bottomDepth: positiveTaperDimension(shape.taperBottomDepth, depth * normalizeTaperScale(shape.taperBottomScale)),
+  };
+}
+
+export function shapeHasTaper(shape: WorkplaneShape) {
+  if (shape.kind === "gear") return false;
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  const taper = shapeTaperDimensions(shape);
+  return Math.abs(taper.topWidth - width) > 1e-6 || Math.abs(taper.topDepth - depth) > 1e-6 || Math.abs(taper.bottomWidth - width) > 1e-6 || Math.abs(taper.bottomDepth - depth) > 1e-6;
+}
+
+export function shapeOverallFootprintDimensions(shape: WorkplaneShape) {
+  if (!shapeHasTaper(shape)) {
+    return { width: shapeWidth(shape), depth: shapeDepth(shape) };
+  }
+  const taper = shapeTaperDimensions(shape);
+  return {
+    width: Math.max(taper.topWidth, taper.bottomWidth),
+    depth: Math.max(taper.topDepth, taper.bottomDepth),
+  };
+}
+
+export function shapeTaperScaleAt(shape: WorkplaneShape, normalizedHeight: number, axis: "width" | "depth" = "width") {
+  if (shape.kind === "gear") return 1;
+  const taper = shapeTaperDimensions(shape);
+  const base = axis === "width" ? shapeWidth(shape) : shapeDepth(shape);
+  const bottom = axis === "width" ? taper.bottomWidth : taper.bottomDepth;
+  const top = axis === "width" ? taper.topWidth : taper.topDepth;
+  const t = Math.min(1, Math.max(0, Number.isFinite(normalizedHeight) ? normalizedHeight : 0));
+  return (bottom + (top - bottom) * t) / Math.max(0.01, base);
 }
 
 export function meshYawDegrees(shape: WorkplaneShape) {
@@ -161,15 +216,28 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
     mirrorZ: shape.mirrorZ || undefined,
   };
   if (shape.groupedShapes) {
-    next.groupedShapes = shape.groupedShapes.map(canonicalizeShape);
+    const children = shape.groupedShapes.map(canonicalizeShape);
+    next.groupedShapes = children.every((child, index) => child === shape.groupedShapes![index]) ? shape.groupedShapes : children;
+  }
+  if (shape.sketchRevolve) {
+    next.sketchRevolve = {
+      startAngle: shape.sketchRevolve.startAngle,
+      sweepAngle: shape.sketchRevolve.sweepAngle,
+      sides: shape.sketchRevolve.sides,
+      quality: shape.sketchRevolve.quality,
+    };
+    if (Object.keys(shape.sketchRevolve).every((key) => key in next.sketchRevolve!)) next.sketchRevolve = shape.sketchRevolve;
   }
   if (shape.edgeTreatmentHistory) {
-    next.edgeTreatmentHistory = shape.edgeTreatmentHistory.map((entry) => ({
-      ...entry,
-      before: canonicalizeShape(entry.before),
-    }));
+    const history = shape.edgeTreatmentHistory.map((entry) => {
+      const before = canonicalizeShape(entry.before);
+      return before === entry.before ? entry : { ...entry, before };
+    });
+    next.edgeTreatmentHistory = history.every((entry, index) => entry === shape.edgeTreatmentHistory![index]) ? shape.edgeTreatmentHistory : history;
   }
-  return next;
+  if (shape.sculptSource) next.sculptSource = canonicalizeShape(shape.sculptSource);
+  // Preserve immutable resource identity when normalization has nothing to do.
+  return (Object.keys(next) as Array<keyof WorkplaneShape>).every((key) => next[key] === shape[key]) ? shape : next;
 }
 
 export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
@@ -199,6 +267,12 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.segments === b.segments &&
     a.topRadius === b.topRadius &&
     a.baseRadius === b.baseRadius &&
+    a.taperTopWidth === b.taperTopWidth &&
+    a.taperTopDepth === b.taperTopDepth &&
+    a.taperBottomWidth === b.taperBottomWidth &&
+    a.taperBottomDepth === b.taperBottomDepth &&
+    a.taperTopScale === b.taperTopScale &&
+    a.taperBottomScale === b.taperBottomScale &&
     a.teeth === b.teeth &&
     a.toothSize === b.toothSize &&
     a.toothWidth === b.toothWidth &&
@@ -216,6 +290,9 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.sketchPlane === b.sketchPlane &&
     a.sketchOperation === b.sketchOperation &&
     a.sketchRevolve === b.sketchRevolve &&
+    a.sculpted === b.sculpted &&
+    a.sculptSource === b.sculptSource &&
+    a.disabledFeatures === b.disabledFeatures &&
     a.edgeTreatments === b.edgeTreatments &&
     a.edgeTreatmentHistory === b.edgeTreatmentHistory &&
     a.cadDisplayEdges === b.cadDisplayEdges &&

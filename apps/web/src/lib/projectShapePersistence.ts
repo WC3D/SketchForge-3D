@@ -3,6 +3,20 @@ import type { WorkplaneShape } from "@/types/sketchforge";
 
 export type ImportedMeshResource = NonNullable<WorkplaneShape["importedMesh"]>;
 
+export function reconcileLoadedProjectShapeCacheEntry<T extends { revision: number }>(
+  existing: T | undefined,
+  loaded: T,
+  persistedRevision: number,
+): T {
+  if (!existing || existing.revision <= persistedRevision) {
+    return loaded;
+  }
+  if (existing.revision >= loaded.revision) {
+    return existing;
+  }
+  return { ...existing, revision: loaded.revision };
+}
+
 type CompactProjectShapeState = {
   shapes: WorkplaneShape[];
   history: EditorHistoryEntry[];
@@ -43,6 +57,7 @@ function compactShape(shape: WorkplaneShape, resources: Map<string, ImportedMesh
       before: compactShape(entry.before, resources),
     }));
   }
+  if (shape.sculptSource) next.sculptSource = compactShape(shape.sculptSource, resources);
   return next;
 }
 
@@ -62,6 +77,7 @@ function hydrateShape(shape: WorkplaneShape, resources: ReadonlyMap<string, Impo
       before: hydrateShape(entry.before, resources),
     }));
   }
+  if (shape.sculptSource) next.sculptSource = hydrateShape(shape.sculptSource, resources);
   return next;
 }
 

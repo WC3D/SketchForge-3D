@@ -187,6 +187,7 @@ export function projectAssetIdsInShapes(shapes: WorkplaneShape[]) {
     if (shape.importedMesh?.assetId) ids.add(shape.importedMesh.assetId);
     shape.groupedShapes?.forEach(visit);
     shape.edgeTreatmentHistory?.forEach((entry) => visit(entry.before));
+    if (shape.sculptSource) visit(shape.sculptSource);
   };
   shapes.forEach(visit);
   return ids;

@@ -16,7 +16,7 @@ import {
   type PlacementWorkplane,
 } from "@/lib/placementWorkplane";
 import { attachProjectAsset, dedupeProjectAssets, MAX_PROJECT_ASSET_BYTES, projectAssetFromBytes, sourceFormatForFileName } from "@/lib/projectAssets";
-import { hydrateProjectShapeState, type ImportedMeshResource } from "@/lib/projectShapePersistence";
+import { hydrateProjectShapeState, reconcileLoadedProjectShapeCacheEntry, type ImportedMeshResource } from "@/lib/projectShapePersistence";
 import { exportSkfProject, importSkfProject, SKF_CREATED_WITH_VERSION } from "@/lib/skfProject";
 import { importExtensionSupported } from "@/lib/importExtensions";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings, workplaneSettingsFingerprint } from "@/lib/workplaneSettings";
@@ -51,6 +51,7 @@ type SharedProject = {
   updatedAt: number;
   size: number;
   revision: string;
+  thumbnailUrl?: string;
 };
 
 type StoredDashboardProject = Partial<DashboardProject> & {
@@ -111,6 +112,7 @@ const PROJECT_SHAPE_RESOURCES_STORE_NAME = "projectShapeResources";
 const DOWNLOAD_MODE_STORAGE_KEY = "sketchForge.downloadMode";
 const DOWNLOAD_FOLDER_STORAGE_KEY = "sketchForge.downloadFolder";
 const THEME_STORAGE_KEY = "sketchForge.defaultTheme";
+const PROJECT_NAME_TOOLBAR_STORAGE_KEY = "sketchForge.showProjectNameInToolbar";
 const ACTIVE_CHALLENGE_TUTORIAL_STORAGE_KEY = "sketchForge.activeChallengeTutorial";
 const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "sketchForge.dismissedUpdateVersion";
 const PROJECT_ACCENTS: DashboardProject["accent"][] = ["cyan", "green", "gold", "red"];
@@ -528,6 +530,7 @@ export default function Home() {
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedAppTheme>("light");
   const [downloadMode, setDownloadMode] = useState<DownloadMode>("browser");
   const [downloadFolder, setDownloadFolder] = useState("");
+  const [showProjectNameInToolbar, setShowProjectNameInToolbar] = useState(true);
   const [dashboardNotice, setDashboardNotice] = useState("");
   const [sharedProjects, setSharedProjects] = useState<SharedProject[]>([]);
   const [sharedProjectsEnabled, setSharedProjectsEnabled] = useState(false);
@@ -582,6 +585,7 @@ export default function Home() {
     }
     setDownloadMode(!STATIC_EXPORT_BUILD && window.localStorage.getItem(DOWNLOAD_MODE_STORAGE_KEY) === "folder" ? "folder" : "browser");
     setDownloadFolder(window.localStorage.getItem(DOWNLOAD_FOLDER_STORAGE_KEY) ?? "");
+    setShowProjectNameInToolbar(window.localStorage.getItem(PROJECT_NAME_TOOLBAR_STORAGE_KEY) !== "false");
 
     const params = new URLSearchParams(window.location.search);
     if (params.has("codexBooleanCase") || params.get("editor") === "1") {
@@ -678,14 +682,27 @@ export default function Home() {
     void loadProjectShapes(activeProjectId)
       .then((record) => {
         if (canceled) return;
-        const revision = activeProject.revision ?? record?.revision ?? Date.now();
-        const entry = projectShapeCacheEntry(revision, record?.shapes ?? [], record?.history, record?.historyIndex, record?.assets);
-        setProjectShapesById((current) => ({
-          ...current,
-          [activeProjectId]: entry,
-        }));
-        if (record && !record.skfPackage) {
-          void saveProjectShapesWhenIdle(activeProjectId, entry, projectShapeSaveContext(activeProject)).catch(() => {
+        const loadedRevision = record?.revision ?? 0;
+        const revision = Math.max(activeProject.revision ?? 0, loadedRevision, 1);
+        const loadedEntry = projectShapeCacheEntry(Math.max(loadedRevision, 1), record?.shapes ?? [], record?.history, record?.historyIndex, record?.assets);
+        const entry = loadedEntry.revision === revision ? loadedEntry : { ...loadedEntry, revision };
+        setProjectShapesById((current) => {
+          // IndexedDB reads are asynchronous. A local edit/import can update the live
+          // cache while this older read is still in flight; never let that stale read
+          // replace newer in-memory shapes. Bump the preserved entry to the requested
+          // project revision so this effect does not immediately retry the same load.
+          const existing = current[activeProjectId];
+          const reconciled = reconcileLoadedProjectShapeCacheEntry(existing, entry, loadedRevision);
+          if (reconciled === existing) return current;
+          return {
+            ...current,
+            [activeProjectId]: reconciled,
+          };
+        });
+        if (record && !record.skfPackage && loadedRevision > 0) {
+          // Migrate the data at the revision it was actually read from disk. Using the
+          // newer project metadata revision here can let stale shapes outrank a live edit.
+          void saveProjectShapesWhenIdle(activeProjectId, loadedEntry, projectShapeSaveContext(activeProject)).catch(() => {
             // The legacy record remains readable and migration can retry on the next load.
           });
         }
@@ -693,10 +710,15 @@ export default function Home() {
       .catch((error) => {
         if (!canceled) {
           setDashboardNotice(error instanceof Error ? error.message : "Could not load project shapes");
-          setProjectShapesById((current) => ({
-            ...current,
-            [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
-          }));
+          setProjectShapesById((current) => {
+            // A failed background read must not erase a project that has already
+            // received live editor changes while the read was pending.
+            if (current[activeProjectId]) return current;
+            return {
+              ...current,
+              [activeProjectId]: projectShapeCacheEntry(activeProject.revision ?? Date.now(), []),
+            };
+          });
         }
       });
     return () => {
@@ -724,7 +746,8 @@ export default function Home() {
     if (!mounted) return;
     window.localStorage.setItem(DOWNLOAD_MODE_STORAGE_KEY, downloadMode);
     window.localStorage.setItem(DOWNLOAD_FOLDER_STORAGE_KEY, downloadFolder);
-  }, [downloadFolder, downloadMode, mounted]);
+    window.localStorage.setItem(PROJECT_NAME_TOOLBAR_STORAGE_KEY, String(showProjectNameInToolbar));
+  }, [downloadFolder, downloadMode, mounted, showProjectNameInToolbar]);
 
   const visibleProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -782,8 +805,9 @@ export default function Home() {
     }
   };
 
-  const updateProjectSnapshot = useCallback((snapshot: { image: string; projectId: string; shapes: number }) => {
+  const updateProjectSnapshot = useCallback(async (snapshot: { image: string; projectId: string; shapes: number }, signal?: AbortSignal) => {
     const version = Date.now();
+    if (signal?.aborted) throw new DOMException("Thumbnail upload aborted", "AbortError");
     if (STATIC_EXPORT_BUILD) {
       setProjects((current) =>
         current.map((project) =>
@@ -798,31 +822,35 @@ export default function Home() {
     setProjects((current) =>
       current.map((project) => (project.id === snapshot.projectId ? { ...project, shapes: snapshot.shapes, updatedAt: version } : project)),
     );
-    void fetch("/api/project-thumbnail", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataUrl: snapshot.image, projectId: snapshot.projectId }),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Thumbnail request failed with ${response.status}`);
-        return response.json() as Promise<{ version?: number }>;
-      })
-      .then((payload) => {
-        const nextVersion = payload.version ?? Date.now();
-        const thumbnailUrl = `/api/project-thumbnail?projectId=${encodeURIComponent(snapshot.projectId)}&v=${nextVersion}`;
-        setProjects((current) =>
-          current.map((project) =>
-            project.id === snapshot.projectId
-              ? { ...project, shapes: snapshot.shapes, thumbnailUrl, thumbnailVersion: nextVersion, updatedAt: nextVersion }
-              : project,
-          ),
-        );
-      })
-      .catch(() => {
-        setProjects((current) =>
-          current.map((project) => (project.id === snapshot.projectId ? { ...project, shapes: snapshot.shapes, updatedAt: version } : project)),
-        );
+    try {
+      const response = await fetch("/api/project-thumbnail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataUrl: snapshot.image, projectId: snapshot.projectId }),
+        signal,
       });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Could not save project thumbnail");
+      }
+      const payload = await response.json() as { version?: number };
+      if (signal?.aborted) throw new DOMException("Thumbnail upload aborted", "AbortError");
+      const nextVersion = payload?.version ?? Date.now();
+      const thumbnailUrl = `/api/project-thumbnail?projectId=${encodeURIComponent(snapshot.projectId)}&v=${nextVersion}`;
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === snapshot.projectId
+            ? { ...project, shapes: snapshot.shapes, thumbnailUrl, thumbnailVersion: nextVersion, updatedAt: nextVersion }
+            : project,
+        ),
+      );
+    } catch (error) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+      setProjects((current) =>
+        current.map((project) => (project.id === snapshot.projectId ? { ...project, shapes: snapshot.shapes, updatedAt: version } : project)),
+      );
+      throw error;
+    }
   }, []);
 
   const updateProjectShapes = useCallback((snapshot: {
@@ -916,6 +944,9 @@ export default function Home() {
         )}:${project.placementElevation ?? 0}:${placementWorkplaneFingerprint(normalizePlacementWorkplane(project.placementWorkplane, project.placementElevation))}:${placementWorkplaneFingerprint(normalizePlacementWorkplane(project.sketchPlacementWorkplane))}`;
         if (currentFingerprint === nextFingerprint) return project;
         changed = true;
+        // `revision` tracks the IndexedDB shape snapshot. Advancing it for a
+        // workspace-only change can make the loader replace newer live shapes
+        // with an older persisted snapshot while autosave is still pending.
         return {
           ...project,
           workspace,
@@ -924,7 +955,6 @@ export default function Home() {
           placementWorkplane,
           sketchPlacementWorkplane,
           updatedAt: version,
-          revision: version,
         };
       });
       if (!changed) return current;
@@ -1023,7 +1053,7 @@ export default function Home() {
     }
   }, [refreshSharedProjects]);
 
-  const saveActiveProjectToShared = useCallback(async ({ exportName, bytes }: { exportName: string; bytes: Uint8Array }) => {
+  const saveActiveProjectToShared = useCallback(async ({ exportName, bytes, thumbnailDataUrl }: { exportName: string; bytes: Uint8Array; thumbnailDataUrl: string }) => {
     const activeProject = projects.find((project) => project.id === activeProjectId);
     if (!activeProject) throw new Error("Open a local project before saving it to the shared space");
     const normalizedExportName = exportName.trim() || activeProject.name;
@@ -1031,11 +1061,17 @@ export default function Home() {
     const fileName = saveBackToSource && activeProject.sharedProject
       ? activeProject.sharedProject.fileName
       : `${normalizedExportName.replace(/\.skf$/i, "")}.skf`;
-    const headers: Record<string, string> = { "Content-Type": "application/vnd.sketchforge.project+zip" };
+    const headers: Record<string, string> = {};
     if (saveBackToSource && activeProject.sharedProject) headers["If-Match"] = `"${activeProject.sharedProject.revision}"`;
     else headers["If-None-Match"] = "*";
     const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    const response = await fetch(`/api/shared-projects?fileName=${encodeURIComponent(fileName)}`, { method: "POST", headers, body });
+    const thumbnailResponse = await fetch(thumbnailDataUrl);
+    const thumbnail = await thumbnailResponse.blob();
+    if (thumbnail.type !== "image/png" || thumbnail.size === 0) throw new Error("Could not prepare the shared project thumbnail");
+    const formData = new FormData();
+    formData.append("project", new Blob([body], { type: "application/vnd.sketchforge.project+zip" }), fileName);
+    formData.append("thumbnail", thumbnail, `${fileName}.png`);
+    const response = await fetch(`/api/shared-projects?fileName=${encodeURIComponent(fileName)}`, { method: "POST", headers, body: formData });
     const payload = await response.json().catch(() => ({})) as { error?: string; project?: SharedProject };
     if (!response.ok || !payload.project) throw new Error(payload.error ?? "Could not save the shared project");
     const savedProject = payload.project;
@@ -1292,8 +1328,13 @@ export default function Home() {
             onProjectShapesChange={updateProjectShapes}
             onProjectSnapshot={updateProjectSnapshot}
             onProjectWorkspaceChange={updateProjectWorkspace}
+            onProjectNameChange={(name) => {
+              if (activeProjectId) renameProject(activeProjectId, name);
+            }}
             projectId={activeProjectId}
             projectName={activeProject?.name}
+            showProjectNameInToolbar={showProjectNameInToolbar}
+            onShowProjectNameInToolbarChange={setShowProjectNameInToolbar}
             projectCreatedAt={activeProject?.createdAt}
             projectModifiedAt={activeProject?.updatedAt}
             projectRevision={activeProjectShapeEntry?.revision ?? activeProject?.revision ?? 0}
@@ -1539,6 +1580,7 @@ function Dashboard({
           updateUrl: "",
           installationReady: true,
           requiresUpdateKey: false,
+          updateMode: "desktop",
         };
         setUpdateStatus(payload);
         if (result.updateAvailable && result.latestVersion) {
@@ -1607,6 +1649,7 @@ function Dashboard({
             updateUrl: "",
             installationReady: true,
             requiresUpdateKey: false,
+            updateMode: "desktop",
           });
           setUpdateMessage("SketchForge is already up to date.");
         } else {
@@ -1637,13 +1680,35 @@ function Dashboard({
         method: "POST",
         headers: { "x-sketchforge-update-key": updateKey.trim() },
       });
-      const payload = await response.json() as { accepted?: boolean; error?: string; updateUrl?: string };
+      const payload = await response.json() as { accepted?: boolean; error?: string; updateUrl?: string; updateMode?: "local" | "server"; restartRequired?: boolean };
       if (!response.ok || !payload.accepted) throw new Error(payload.error || "Could not start the update");
       if (updateStatus.latestVersion) {
         window.localStorage.setItem(DISMISSED_UPDATE_VERSION_STORAGE_KEY, updateStatus.latestVersion);
       }
-      setUpdateMessage("Update started. The server may briefly go offline; reopen this page after it restarts.");
       setUpdateKey("");
+      if (payload.updateMode === "local" || updateStatus.updateMode === "local") {
+        const expectedVersion = updateStatus.latestVersion;
+        setUpdateMessage("Update installed. Restarting local SketchForge…");
+        await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          try {
+            const statusResponse = await fetch("/api/app-update?force=1", { cache: "no-store" });
+            if (statusResponse.ok) {
+              const statusPayload = await statusResponse.json() as AppUpdateStatus;
+              if (!expectedVersion || statusPayload.currentVersion === expectedVersion || !statusPayload.updateAvailable) {
+                window.location.reload();
+                return;
+              }
+            }
+          } catch {
+            // The local dev server is expected to be briefly unavailable while it restarts.
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        }
+        setUpdateMessage("Update installed. Reload this page once local SketchForge finishes restarting.");
+      } else {
+        setUpdateMessage("Update started. The server may briefly go offline; reopen this page after it restarts.");
+      }
     } catch (error) {
       setUpdateMessage(error instanceof Error ? error.message : "Could not start the update");
     } finally {
@@ -1723,7 +1788,7 @@ function Dashboard({
                   {sharedProjects.map((project, index) => (
                     <article className="project-card shared-project-card" key={project.fileName}>
                       <button className="project-card-open" type="button" onClick={() => onOpenSharedProject(project)}>
-                        <ProjectPreview accent={PROJECT_ACCENTS[index % PROJECT_ACCENTS.length]} />
+                        <ProjectPreview accent={PROJECT_ACCENTS[index % PROJECT_ACCENTS.length]} thumbnailUrl={project.thumbnailUrl} />
                         <span className="project-card-title">{project.name}</span>
                         <span className="project-card-meta">{formatUpdated(project.updatedAt)} - {formatFileSize(project.size)}</span>
                       </button>
@@ -1974,7 +2039,11 @@ function Dashboard({
             <div className="dashboard-update-copy">
               <p>Do you want to update from version {updateStatus.currentVersion}?</p>
               <div className="dashboard-update-safety">
-                Your projects are kept. Private projects stay in this browser, and Docker shared projects remain in the persistent <code>/data/projects</code> volume.
+                {updateStatus.updateMode === "local" ? (
+                  <>Your browser projects are kept. The updater only replaces the local SketchForge application files.</>
+                ) : (
+                  <>Your projects are kept. Private projects stay in this browser, and Docker shared projects remain in the persistent <code>/data/projects</code> volume.</>
+                )}
               </div>
               {!updateStatus.installationReady ? (
                 <div className="dashboard-update-note">One-click installation is not configured on this server. Continue to the safe update guide.</div>
@@ -2034,7 +2103,7 @@ function Dashboard({
           </label>
           <div className="dashboard-version-row">
             <span>SketchForge version</span>
-            <strong>{desktopAppVersion ?? SKF_CREATED_WITH_VERSION}</strong>
+            <strong>{desktopAppVersion ?? updateStatus?.currentVersion ?? SKF_CREATED_WITH_VERSION}</strong>
           </div>
           <section className="dashboard-update-settings" aria-label="Software updates">
             <div>
