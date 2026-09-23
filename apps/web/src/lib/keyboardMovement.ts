@@ -1,6 +1,7 @@
 import type { PlacementWorkplane } from "@/lib/placementWorkplane";
 import { cleanNearZero } from "@/lib/workplaneShapes";
-import type { WorkplaneShape } from "@/types/sketchforge";
+import type { GridSize, WorkplaneShape } from "@/types/sketchforge";
+import { DEFAULT_SNAP_GRID, keyboardNudgeStep } from "@/lib/workplaneSettings";
 
 export type KeyboardMovementEvent = Pick<KeyboardEvent, "key" | "repeat" | "ctrlKey" | "metaKey" | "shiftKey">;
 
@@ -10,9 +11,10 @@ export function isMovementKey(key: string) {
 
 export function moveShapesByKeyboard(
   shapes: WorkplaneShape[], selectedIds: string[], event: KeyboardMovementEvent, workplane: PlacementWorkplane,
+  snap: GridSize = DEFAULT_SNAP_GRID,
 ) {
   if (!isMovementKey(event.key)) return shapes;
-  const step = event.shiftKey ? 5 : 1;
+  const step = keyboardNudgeStep(snap, event.shiftKey);
   const vertical = (event.ctrlKey || event.metaKey) && (event.key === "ArrowUp" || event.key === "ArrowDown");
   const axis = vertical ? workplane.normal
     : event.key === "ArrowLeft" || event.key === "ArrowRight" ? workplane.xAxis : workplane.zAxis;

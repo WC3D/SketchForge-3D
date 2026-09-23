@@ -24,6 +24,7 @@ import { createGearGeometry } from "@/lib/gearGeometry";
 import { regularPolygonFootprintScale } from "@/lib/regularPolygonFootprint";
 import {
   ToolbarAlignIcon,
+  ToolbarCenterOnWorkplaneIcon,
   ToolbarChamferIcon,
   ToolbarCaretDownIcon,
   ToolbarCopyIcon,
@@ -77,6 +78,7 @@ import {
   workplaneShapesEqual,
 } from "@/lib/workplaneShapes";
 import { bakeCadMetadataForShapeTransform, cadBrepTransformForShape, cadImportedStepTransformForShape, cadModifierPrimitiveForAnalyticBox, cadModifierPrimitiveForBakedShape } from "@/lib/cadBakeMetadata";
+import { workplaneCenteringOffset } from "@/lib/workplaneCentering";
 import { hasOneToOneCadComponentMapping } from "@/lib/cadModifierGroups";
 import {
   CAD_MODIFIER_MAX_SHARP_ANGLE,
@@ -6979,7 +6981,7 @@ export function SketchForgeEditor({
       return true;
     },
     move: (event) => {
-      const next = moveShapesByKeyboard(shapesRef.current, selectedIdsRef.current, event, placementWorkplaneRef.current);
+      const next = moveShapesByKeyboard(shapesRef.current, selectedIdsRef.current, event, placementWorkplaneRef.current, snapGridRef.current);
       if (next === shapesRef.current) return;
       interactionHistoryChangedRef.current = true;
       shapesRef.current = next;
@@ -9564,6 +9566,39 @@ export function SketchForgeEditor({
     setWorkplaneMode(false);
     setNotice("Choose a principal plane or create one from a model face");
   }, []);
+  const centerSelectionOnWorkplane = useCallback(() => {
+    if (!hasSelection) {
+      setNotice("Select a shape first");
+      return;
+    }
+    const selected = new Set(selectedIds);
+    // Locked objects stay where they are, so they must not widen the bounding box
+    // either - otherwise the objects that do move end up off-center.
+    const movable = shapes.filter((shape) => selected.has(shape.id) && !shape.locked);
+    if (movable.length === 0) {
+      setNotice("Unlock the selection before centering it");
+      return;
+    }
+    const offset = workplaneCenteringOffset(boundsForShapes(movable));
+    if (!offset) {
+      setNotice("Selection has no measurable geometry to center");
+      return;
+    }
+    const offsetX = cleanNearZero(offset.x);
+    const offsetZ = cleanNearZero(offset.z);
+    if (offsetX === 0 && offsetZ === 0) {
+      setNotice("Selection is already centered on the workplane");
+      return;
+    }
+    const movableIds = new Set(movable.map((shape) => shape.id));
+    commitShapes(
+      shapes.map((shape) => (movableIds.has(shape.id)
+        ? { ...shape, x: cleanNearZero(shape.x + offsetX), z: cleanNearZero(shape.z + offsetZ) }
+        : shape)),
+      selectedIds,
+      movable.length === 1 ? "Centered selection on the workplane" : `Centered ${movable.length} objects on the workplane`,
+    );
+  }, [commitShapes, hasSelection, selectedIds, shapes]);
 
   const activateWorkplaneTool = useCallback(() => {
     setConstructionPlanePanelOpen(false);
@@ -10945,6 +10980,7 @@ export function SketchForgeEditor({
         onCopy={copySelected}
         onDelete={deleteSelected}
         onDuplicate={duplicateSelected}
+        onCenterOnWorkplane={centerSelectionOnWorkplane}
         onDropToWorkplane={dropSelectedToWorkplane}
         onGroup={groupSelected}
         onIntersect={intersectSelected}
@@ -11662,6 +11698,7 @@ function SecondaryToolbar({
   onCopy,
   onDelete,
   onDuplicate,
+  onCenterOnWorkplane,
   onDropToWorkplane,
   onGroup,
   onIntersect,
@@ -11741,6 +11778,7 @@ function SecondaryToolbar({
   onCopy: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  onCenterOnWorkplane: () => void;
   onDropToWorkplane: () => void;
   onGroup: () => void;
   onIntersect: () => void;
@@ -11931,6 +11969,7 @@ function SecondaryToolbar({
   const arrangeTools = [
     { label: "Workplane", icon: ToolbarWorkplaneIcon, action: onWorkplaneTool, enabled: geometryActionsEnabled, active: workplaneMode },
     { label: "Drop to workplane", icon: ToolbarDropToWorkplaneIcon, action: onDropToWorkplane, enabled: hasSelection && geometryActionsEnabled },
+    { label: "Center on workplane", icon: ToolbarCenterOnWorkplaneIcon, action: onCenterOnWorkplane, enabled: hasSelection && geometryActionsEnabled },
   ];
   const renderToolButton = (tool: (typeof leftTools)[number] | (typeof visibilityTools)[number] | (typeof combineTools)[number] | (typeof modifyTools)[number] | (typeof arrangeTools)[number]) => {
     const { icon: Icon, action, enabled, label } = tool;
@@ -12065,35 +12104,7 @@ function SecondaryToolbar({
           ) : null}
         </div>
       </div>
-      {showProjectNameInToolbar ? (
-        <div className="toolbar-spacer toolbar-project-name">
-          <label ref={projectNameFieldRef} className="toolbar-project-name-field" title="Rename project">
-            <input
-              ref={projectNameInputRef}
-              aria-label="Project name"
-              value={projectNameDraft}
-              maxLength={80}
-              spellCheck={false}
-              onChange={(event) => setProjectNameDraft(event.target.value)}
-              onBlur={(event) => {
-                if (cancelProjectNameEditRef.current) {
-                  cancelProjectNameEditRef.current = false;
-                  setProjectNameDraft(projectName);
-                  return;
-                }
-                commitProjectName(event.currentTarget.value);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") event.currentTarget.blur();
-                if (event.key === "Escape") {
-                  cancelProjectNameEditRef.current = true;
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-          </label>
-        </div>
-      ) : <div className="toolbar-spacer" />}
+      <div className="toolbar-spacer" />
       <div className="tool-group right">
         <div className="toolbar-section compact toolbar-visibility-section" ref={visibilityMenuRef}>
           <div className="toolbar-section-label">Visibility</div>
@@ -12415,34 +12426,65 @@ function SecondaryToolbar({
           </div>
         )}
       </div>
-      <div className="toolbar-workspace-tabs" role="tablist" aria-label="Editor mode">
-        <button
-          className={toolbarMode === "geometry" ? "active" : ""}
-          type="button"
-          role="tab"
-          aria-selected={toolbarMode === "geometry"}
-          onClick={() => selectToolbarMode("geometry")}
-        >
-          Geometry
-        </button>
-        <button
-          className={toolbarMode === "sketch" ? "active" : ""}
-          type="button"
-          role="tab"
-          aria-selected={toolbarMode === "sketch"}
-          onClick={() => selectToolbarMode("sketch")}
-        >
-          Sketch
-        </button>
-        <button
-          className={toolbarMode === "sculpt" ? "active" : ""}
-          type="button"
-          role="tab"
-          aria-selected={toolbarMode === "sculpt"}
-          onClick={() => selectToolbarMode("sculpt")}
-        >
-          Sculpt
-        </button>
+      <div className="toolbar-title-row">
+        <div className="toolbar-workspace-tabs" role="tablist" aria-label="Editor mode">
+          <button
+            className={toolbarMode === "geometry" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={toolbarMode === "geometry"}
+            onClick={() => selectToolbarMode("geometry")}
+          >
+            Geometry
+          </button>
+          <button
+            className={toolbarMode === "sketch" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={toolbarMode === "sketch"}
+            onClick={() => selectToolbarMode("sketch")}
+          >
+            Sketch
+          </button>
+          <button
+            className={toolbarMode === "sculpt" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={toolbarMode === "sculpt"}
+            onClick={() => selectToolbarMode("sculpt")}
+          >
+            Sculpt
+          </button>
+        </div>
+        {showProjectNameInToolbar ? (
+          <div className="toolbar-project-name">
+            <label ref={projectNameFieldRef} className="toolbar-project-name-field" title="Rename project">
+              <input
+                ref={projectNameInputRef}
+                aria-label="Project name"
+                value={projectNameDraft}
+                maxLength={80}
+                spellCheck={false}
+                onChange={(event) => setProjectNameDraft(event.target.value)}
+                onBlur={(event) => {
+                  if (cancelProjectNameEditRef.current) {
+                    cancelProjectNameEditRef.current = false;
+                    setProjectNameDraft(projectName);
+                    return;
+                  }
+                  commitProjectName(event.currentTarget.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                  if (event.key === "Escape") {
+                    cancelProjectNameEditRef.current = true;
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            </label>
+          </div>
+        ) : null}
       </div>
     </div>
   );

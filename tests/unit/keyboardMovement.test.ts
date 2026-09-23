@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { appendEditorHistorySnapshot, editorHistoryEntry } from "@/lib/editorHistory";
 import { createKeyboardMovementInteraction, moveShapesByKeyboard, type KeyboardMovementEvent } from "@/lib/keyboardMovement";
 import { horizontalPlacementWorkplane, type PlacementWorkplane } from "@/lib/placementWorkplane";
-import type { WorkplaneShape } from "@/types/sketchforge";
+import type { GridSize, WorkplaneShape } from "@/types/sketchforge";
 
 function box(id = "box", locked = false): WorkplaneShape {
   return { id, name: id, kind: "box", color: "#123456", x: 0, z: 0, elevation: 0,
@@ -13,7 +13,7 @@ function key(key: string, overrides: Partial<KeyboardMovementEvent> = {}): Keybo
   return { key, repeat: false, ctrlKey: false, metaKey: false, shiftKey: false, ...overrides };
 }
 
-function editorHarness(initial = [box()], selectedIds = ["box"]) {
+function editorHarness(initial = [box()], selectedIds = ["box"], snap: GridSize = "1.0 mm") {
   let shapes = initial;
   let history = [editorHistoryEntry(shapes, selectedIds)];
   let index = 0;
@@ -26,7 +26,7 @@ function editorHarness(initial = [box()], selectedIds = ["box"]) {
   });
   const movement = createKeyboardMovementInteraction({
     begin,
-    move: (event) => { shapes = moveShapesByKeyboard(shapes, selectedIds, event, horizontalPlacementWorkplane()); },
+    move: (event) => { shapes = moveShapesByKeyboard(shapes, selectedIds, event, horizontalPlacementWorkplane(), snap); },
     end: () => {
       busy = false;
       const appended = appendEditorHistorySnapshot(history, index, editorHistoryEntry(shapes, selectedIds));
@@ -46,6 +46,25 @@ function editorHarness(initial = [box()], selectedIds = ["box"]) {
 }
 
 describe("keyboard movement interactions", () => {
+  it("uses the snap grid for held nudges while preserving one reversible history step", () => {
+    const editor = editorHarness([{ ...box(), x: 3 }], ["box"], "5.0 mm");
+    editor.movement.keyDown(key("ArrowRight"));
+    editor.movement.keyDown(key("ArrowRight", { repeat: true }));
+    expect(editor.shapes[0].x).toBe(13);
+    expect(editor.save).not.toHaveBeenCalled();
+    editor.movement.keyUp("ArrowRight");
+    expect(editor.save).toHaveBeenCalledTimes(1);
+    editor.undo();
+    expect(editor.shapes[0].x).toBe(3);
+    editor.redo();
+    expect(editor.shapes[0].x).toBe(13);
+  });
+
+  it("uses coarse grid steps for elevation changes", () => {
+    const moved = moveShapesByKeyboard([box()], ["box"], key("ArrowUp", { ctrlKey: true, shiftKey: true }), horizontalPlacementWorkplane(), "5.0 mm");
+    expect(moved[0].elevation).toBe(25);
+  });
+
   it.each([
     ["ArrowRight", {}, "x", 31],
     ["ArrowLeft", {}, "x", -31],

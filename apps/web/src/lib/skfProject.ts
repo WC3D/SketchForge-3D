@@ -7,11 +7,14 @@ import { canonicalizeShape } from "@/lib/workplaneShapes";
 import { importedShapeFromStl } from "@/lib/stlImport";
 import { importedShapeFromSvg } from "@/lib/svgImport";
 import { normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
-import type { GridSize, ProjectAsset, ProjectAssetSourceFormat, SketchOperation, SketchRevolveSettings, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import type { CadDisplayEdge, GridSize, ProjectAsset, ProjectAssetSourceFormat, SketchOperation, SketchRevolveSettings, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 export const SKF_SCHEMA_ID = "com.sketchforge.project";
+// Version 2 stores display edges as deduplicated archive assets instead of repeating
+// them inside every undo state. Version 1 packages are still read and migrated.
 export const SKF_FORMAT_VERSION = 2;
 export const SKF_MINIMUM_READER_VERSION = 2;
+export const SKF_OLDEST_READABLE_FORMAT_VERSION = 1;
 export const SKF_CREATED_WITH_VERSION = "1.0.9";
 export const SKF_MEDIA_TYPE = "application/vnd.sketchforge.project+zip";
 
@@ -25,6 +28,7 @@ export const SKF_LIMITS = {
   objectsPerState: 100_000,
   features: 300_000,
   meshNumbers: 30_000_000,
+  displayEdgeNumbers: 30_000_000,
 } as const;
 
 const SHAPE_KINDS = new Set([
@@ -77,6 +81,8 @@ export type SkfShapeNodeV1 = {
     beforeNodeId: string;
   }>;
   cadBrepAssetId?: string;
+  // Format version 2 and later. Version 1 nodes keep their display edges inline
+  // in `definition.cadDisplayEdges`.
   cadDisplayEdgesAssetId?: string;
 };
 
@@ -220,7 +226,7 @@ function safeArchivePath(path: string) {
 function extensionForAsset(kind: SkfAssetKind, mediaType: string, sourceFormat?: ProjectAssetSourceFormat) {
   if (kind === "source" && sourceFormat) return sourceFormat === "step" ? "step" : sourceFormat;
   if (kind === "derived-mesh") return "skfmesh";
-  if (kind === "display-edges") return "json";
+  if (kind === "display-edges") return "skfedges";
   if (kind === "brep") return "brep";
   if (mediaType.includes("png")) return "png";
   if (mediaType.includes("jpeg")) return "jpg";
@@ -278,6 +284,57 @@ function decodeMeshCache(bytes: Uint8Array) {
     offset += 8;
   }
   return { positions, normals };
+}
+
+function encodeDisplayEdges(edges: CadDisplayEdge[]) {
+  let numbers = 0;
+  for (const edge of edges) {
+    if (!Array.isArray(edge?.points)) throw new Error("A display edge is missing its point list");
+    numbers += edge.points.length;
+  }
+  if (numbers > SKF_LIMITS.displayEdgeNumbers) throw new Error("Display edges are too large for a SketchForge project file");
+  const bytes = new Uint8Array(16 + edges.length * 4 + numbers * 8);
+  bytes.set(strToU8("SKFEDG1\0"), 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(8, edges.length, true);
+  view.setUint32(12, numbers, true);
+  let offset = 16 + edges.length * 4;
+  edges.forEach((edge, index) => {
+    view.setUint32(16 + index * 4, edge.points.length, true);
+    for (const value of edge.points) {
+      if (!Number.isFinite(value)) throw new Error("A display edge contains an invalid coordinate");
+      view.setFloat64(offset, value, true);
+      offset += 8;
+    }
+  });
+  return bytes;
+}
+
+function decodeDisplayEdges(bytes: Uint8Array): CadDisplayEdge[] {
+  if (bytes.byteLength < 16 || strFromU8(bytes.subarray(0, 8)) !== "SKFEDG1\0") {
+    throw new Error("A display edge asset has an invalid header");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const edgeCount = view.getUint32(8, true);
+  const numbers = view.getUint32(12, true);
+  if (numbers > SKF_LIMITS.displayEdgeNumbers) throw new Error("A display edge asset exceeds the supported coordinate limit");
+  if (bytes.byteLength !== 16 + edgeCount * 4 + numbers * 8) throw new Error("A display edge asset is truncated or malformed");
+  const edges = new Array<CadDisplayEdge>(edgeCount);
+  let offset = 16 + edgeCount * 4;
+  let counted = 0;
+  for (let index = 0; index < edgeCount; index += 1) {
+    const length = view.getUint32(16 + index * 4, true);
+    counted += length;
+    if (counted > numbers) throw new Error("A display edge asset is truncated or malformed");
+    const points = new Array<number>(length);
+    for (let point = 0; point < length; point += 1) {
+      points[point] = view.getFloat64(offset, true);
+      offset += 8;
+    }
+    edges[index] = { points };
+  }
+  if (counted !== numbers) throw new Error("A display edge asset is truncated or malformed");
+  return edges;
 }
 
 function decodeDataUrl(dataUrl: string) {
@@ -419,19 +476,17 @@ class SkfArchiveBuilder {
 
   async addDisplayEdges(edges: NonNullable<WorkplaneShape["cadDisplayEdges"]>) {
     return this.addEncodedAsset("display-edges", await memoizedEncoding(edgeEncodingCache, edges,
-      () => strToU8(JSON.stringify(edges))), "application/vnd.sketchforge.display-edges+json");
+      () => encodeDisplayEdges(edges)), "application/vnd.sketchforge.edges");
   }
 
   async addSources(assets: ProjectAsset[], referencedIds: Set<string>) {
-    const normalized = assets
+    const referenced = assets
       .filter((asset) => referencedIds.has(asset.id))
       .map((asset) => asset.bytes instanceof Uint8Array ? asset : normalizeProjectAsset(asset))
       .sort((a, b) => a.id.localeCompare(b.id));
-    for (const asset of normalized) {
-      const record = await this.addAsset("source", asset.bytes, asset.mediaType, {
-        fileName: asset.name,
-        sourceFormat: asset.sourceFormat,
-      });
+    for (const asset of referenced) {
+      const options = { fileName: asset.name, sourceFormat: asset.sourceFormat };
+      const record = await this.addAsset("source", asset.bytes, asset.mediaType, options);
       this.sourceIdMap.set(asset.id, record.id);
     }
   }
@@ -540,6 +595,10 @@ async function serializeShapeNode(
     ...baseDefinition
   } = canonicalizeShape(shape);
   const definition: Record<string, unknown> = { ...baseDefinition };
+  // Display edges are the largest part of a CAD object and stay identical across
+  // undo states, so they live in a deduplicated asset instead of in every state.
+  const cadDisplayEdgesAssetId = cadDisplayEdges?.length ? (await builder.addDisplayEdges(cadDisplayEdges)).id : undefined;
+  if (cadDisplayEdges && !cadDisplayEdges.length) definition.cadDisplayEdges = [];
 
   if (imagePlate) {
     const { dataUrl, ...plateDefinition } = imagePlate;
@@ -595,7 +654,6 @@ async function serializeShapeNode(
 
   let cadBrepAssetId: string | undefined;
   if (cadBrep) cadBrepAssetId = (await builder.addText("brep", cadBrep, "application/vnd.sketchforge.brep")).id;
-  const cadDisplayEdgesAssetId = cadDisplayEdges ? (await builder.addDisplayEdges(cadDisplayEdges)).id : undefined;
 
   const groupedShapeNodeIds: string[] = [];
   for (const child of groupedShapes ?? []) {
@@ -866,6 +924,9 @@ export async function exportSkfProject(input: SkfProjectExportInput) {
     throw new Error("Project data exceeds the 64 MB .skf limit. Export with fewer history steps or simplify the project.");
   }
   builder.files["project.json"] = projectJson;
+  if (Object.keys(builder.files).length > SKF_LIMITS.entries) {
+    throw new Error("Project has too many stored assets for the .skf format. Export with fewer history steps.");
+  }
   return zipAsync(Object.fromEntries(Object.entries(builder.files).sort(([a], [b]) => a.localeCompare(b))), input.compressionLevel);
 }
 
@@ -1184,7 +1245,9 @@ async function validateDocumentAndAssets(raw: unknown, files: ArchiveFiles) {
   if (document.formatVersion > SKF_FORMAT_VERSION) {
     throw new Error(`This project uses .skf format ${document.formatVersion}, which requires a newer SketchForge version`);
   }
-  if (document.formatVersion < 1) throw new Error(`Packaged .skf format ${document.formatVersion} requires migration support that is not available`);
+  if (document.formatVersion < SKF_OLDEST_READABLE_FORMAT_VERSION) {
+    throw new Error(`Packaged .skf format ${document.formatVersion} requires migration support that is not available`);
+  }
   if (!Number.isInteger(document.minimumReaderVersion) || document.minimumReaderVersion > SKF_FORMAT_VERSION) {
     throw new Error("This project requires a newer SketchForge reader and was not opened");
   }
@@ -1240,7 +1303,9 @@ async function validateDocumentAndAssets(raw: unknown, files: ArchiveFiles) {
         ["baseWidth", "baseDepth", "baseHeight", "triangleCount"].forEach((field) => finiteNumber(node.importedMesh?.[field as keyof SkfImportedMeshReferenceV1], `object '${objectId}'.${field}`));
       }
       if (node.cadBrepAssetId && assetById.get(node.cadBrepAssetId)?.kind !== "brep") throw new Error(`Object '${objectId}' has a missing exact B-Rep asset`);
-      if (node.cadDisplayEdgesAssetId && assetById.get(node.cadDisplayEdgesAssetId)?.kind !== "display-edges") throw new Error(`Object '${objectId}' has a missing display-edge asset`);
+      if (node.cadDisplayEdgesAssetId && assetById.get(node.cadDisplayEdgesAssetId)?.kind !== "display-edges") {
+        throw new Error(`Object '${objectId}' has a missing display edge asset`);
+      }
       nodeById.set(nodeId, node);
     });
     const roots = stringArray(state.rootNodeIds, `state '${stateId}'.rootNodeIds`);
@@ -1328,7 +1393,13 @@ class RestoredResourceCache {
     const key = record ? record.id : JSON.stringify(inline);
     let edges = this.edges.get(key);
     if (!edges) {
-      const value: unknown = record ? JSON.parse(this.text(record, files)) : inline;
+      // Earlier format-2 saves on this branch used JSON edge assets. Accept
+      // those alongside the upstream binary representation and inline V1 data.
+      const value: unknown = record
+        ? record.mediaType === "application/vnd.sketchforge.display-edges+json"
+          ? JSON.parse(this.text(record, files))
+          : decodeDisplayEdges(files[record.path])
+        : inline;
       if (!Array.isArray(value) || value.length > SKF_LIMITS.meshNumbers) throw new Error("Invalid display-edge resource");
       let coordinates = 0;
       for (const edge of value) {
@@ -1503,6 +1574,7 @@ async function restoreV1(document: SkfProjectDocumentV1, assetById: Map<string, 
     placementElevation: document.editor.placementElevation,
     placementWorkplane: normalizePlacementWorkplane(document.editor.placementWorkplane, document.editor.placementElevation),
     sketchPlacementWorkplane: normalizePlacementWorkplane(document.editor.sketchPlacementWorkplane),
+    ...(document.formatVersion < SKF_FORMAT_VERSION ? { migratedFromVersion: document.formatVersion } : {}),
   } satisfies SkfRestoredProject;
 }
 

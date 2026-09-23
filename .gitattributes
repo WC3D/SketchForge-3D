@@ -4,3 +4,4 @@
 *.pdf binary
 *.wasm binary
 *.ico binary
+*.skf binary
