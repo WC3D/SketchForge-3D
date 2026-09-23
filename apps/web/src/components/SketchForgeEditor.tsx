@@ -10829,6 +10829,9 @@ export function SketchForgeEditor({
       } else if (key === "m") {
         event.preventDefault();
         toggleMirrorMode();
+      } else if (key === "l") {
+        event.preventDefault();
+        toggleAlignMode();
       }
     };
 
