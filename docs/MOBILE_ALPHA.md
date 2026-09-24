@@ -1,0 +1,74 @@
+# Mobile Alpha
+
+`Mobile-Alpha` adds browser touch controls and compact-screen layouts to the existing editor. It uses the existing locally hosted application and file import/export workflow; no mobile app or cloud account is required.
+
+## Try it on your local network
+
+Use one development server per checkout. Stop an existing development server before switching its port, then run from this branch:
+
+```sh
+npm ci
+npm run dev -- --hostname 0.0.0.0 --port 3001
+```
+
+On a phone or tablet on the same network, visit `http://<computer-LAN-IP>:3001`. The computer must allow connections to that port. The Next.js development configuration already allows the computer's local IPv4 addresses. For a custom hostname, set `SKETCHFORGE_ALLOWED_DEV_ORIGINS` to that hostname when starting the server.
+
+Projects live in browser storage for that address and browser. To move a project between desktop and mobile, export/import its `.skf` file. Port 3001 also gives testing its own browser storage, separate from port 3000. Test on project copies: this branch includes the upstream binary display-edge format, which needs the updated reader.
+
+For the local printing workflow: design in SketchForge, export STL or 3MF to the device's downloads/files, then import that file into your locally hosted slicer's web interface. This alpha does not add a direct slicer API integration.
+
+## Controls
+
+| Input | Behavior |
+| --- | --- |
+| Tap an object in Edit | Select it; tap empty space to clear selection |
+| Drag an already-selected object | Move it; the completed drag is one undo step |
+| Drag empty space or an unselected object | Orbit the 3D camera |
+| Two-finger drag | Pan |
+| Pinch | Zoom, including in the 2D sketch view |
+| View button (Navigate) | Navigate with one finger anywhere without editing; sketch view pans |
+| Multi button | Toggle individual objects in/out of the selection by tapping |
+| Edit in Sculpt | Drag to brush or tap for one dab |
+| Draw in Sketch | Use the active drawing/selection tool with one finger |
+| Curved-arrow buttons | Undo/redo the current geometry or sketch history |
+| ? button | Show gesture help |
+
+The first finger is held pending until it moves beyond an 8-pixel threshold or is released. A second finger takes over navigation, so an ordinary pinch does not start a brush stroke or place a sketch point. An unfinished drag preview is cancelled on takeover; brush changes already applied remain undoable, and pending worker results are cancelled. Navigation keeps ownership until all fingers lift. Finish a resize/rotate handle adjustment before starting a camera gesture.
+
+Pen contacts are explicitly captured for the active tool and suppress native browser gestures on the drawing surface. Touch contacts are ignored while a pen is down. A cancelled/interrupted pen contact cancels unfinished drag or curve previews and pending brush work. Shape-menu taps support both pen and touch pointer events. Mouse buttons and keyboard shortcuts retain their existing behavior.
+
+## Layout
+
+- Tool ribbons scroll horizontally rather than squeezing their icons.
+- Tablet title rows reserve the full touch-button height, including at widths above the phone breakpoint. Dropdowns are fixed to the visible viewport below their toolbar section so scrolling the ribbon cannot clip them.
+- Coarse-pointer devices get larger buttons, handles, and sketch point targets.
+- The scene inspector starts collapsed on compact screens.
+- Phone shape properties use a scrollable lower panel with a visible collapse control.
+- Touch controls and undo/redo remain available in geometry, sketch, and sculpt views.
+- Dynamic viewport height, safe-area spacing, and readable input sizes accommodate mobile browsers without disabling page zoom outside the drawing surfaces.
+
+## Validation
+
+Automated unit coverage: touch-intent arbitration, multi-touch takeover, finger-lift ordering, cancellation, extra fingers, degenerate pinches, perspective/orthographic camera mathematics, and dropdown placement.
+
+Repeatable browser regression tests:
+
+```sh
+npx playwright install chromium webkit
+npm run test:mobile
+```
+
+The suite reuses a server on port 3000 or starts a development server when none is running. To test an existing server on another address, use `SKETCHFORGE_TEST_URL=http://localhost:3001 npm run test:mobile`. Each test uses fresh browser storage. Tests live in `tests/browser/` and run separately from the Vitest suite.
+
+The menu tests run in Chromium and WebKit at 390×844, 820×1180, 1024×768, and 1366×1024. They check actual hit-test visibility before tapping, because browser automation's automatic scrolling can otherwise hide a clipped-dropdown bug. Native pen-event tests exercise menu selection, geometry drag/undo, interrupted drags, sculpt dab/undo, sketch points, Bezier cancellation, palm rejection, and returning to touch. Pen injection uses Chromium's debugging protocol; that test is explicitly skipped in WebKit, so it does not substitute for testing a physical Apple Pencil.
+
+Chromium touch emulation was exercised at phone portrait (390×844) size. Checks included selection, object dragging/undo, orbiting, pinching without geometry changes, multi-selection, sculpt dab/undo, sketch tap/pinch/undo, and STL download/import. Additional page-overflow checks covered phone landscape (844×390) and tablet (1024×768) sizes.
+
+Physical-device testing is still needed, especially iOS Safari, Android Chrome, stylus input, the on-screen numeric keyboard, and large meshes. On a device, also verify:
+
+1. Open and re-save a copied `.skf` project, then reload it.
+2. Resize and rotate a shape; enter an exact dimension with the keyboard.
+3. Add a second finger during drawing or dragging, and release fingers in either order.
+4. Rotate the device, background/restore the browser, and resume editing.
+5. Export STL/3MF and open the result in the local slicer.
+6. Repeat the workflow on a desktop with a mouse to check hybrid-input behavior.

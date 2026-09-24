@@ -23,6 +23,7 @@
     "test": "vitest run --config tests/vitest.config.ts",
     "test:watch": "vitest --config tests/vitest.config.ts",
     "test:e2e": "vitest run --config tests/vitest.e2e.config.ts",
+    "test:mobile": "playwright test --config tests/playwright.mobile.config.ts",
     "perf": "vitest run --config tests/vitest.perf.config.ts --reporter verbose",
     "ci": "npm run typecheck && npm run test",
     "docker:build": "docker build -f deploy/docker/Dockerfile -t sketchforge:local .",
@@ -56,6 +57,7 @@
     "three-mesh-bvh": "^0.9.13"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.15.18",
     "@types/react": "^19.1.4",
     "@types/react-dom": "^19.1.5",

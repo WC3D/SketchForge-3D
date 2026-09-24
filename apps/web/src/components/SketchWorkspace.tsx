@@ -4,6 +4,8 @@ import { ChevronUp, CornerDownRight, Home, Link, Link2Off, LockKeyhole, LockKeyh
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { SnapGridControl } from "@/components/workplane/ShapeInspector";
 import { SketchRevolvePreview } from "@/components/SketchRevolvePreview";
+import { TouchControls, type TouchHistory } from "@/components/TouchControls";
+import { useTouchNavigation } from "@/components/useTouchNavigation";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import { WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
 import { closestPointOnSketchSegment, type SketchSegmentPlacement } from "@/lib/sketchPointRefinement";
@@ -66,6 +68,7 @@ type SketchWorkspaceProps = {
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   planeName?: string;
+  touchHistory?: TouchHistory;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
   onAddPrimitive: (primitive: SketchPrimitive, center: { x: number; z: number }) => void;
   onPointPress: (id: string) => void;
@@ -526,6 +529,7 @@ export function SketchWorkspace({
   initialSnap,
   initialWorkspace,
   planeName = "Base XZ plane",
+  touchHistory,
   onPlanePoint,
   onAddPrimitive,
   onPointPress,
@@ -742,6 +746,32 @@ export function SketchWorkspace({
       z: text.z,
     })),
   ]), [centerSnapCandidates, displayProfile.points, displayProfile.segments, pointById, profile.texts]);
+
+  const [touchNavigate, setTouchNavigate] = useState(false);
+  const touchAvailable = useTouchNavigation(svgRef, {
+    resetKey: `${touchNavigate}:${tool}`,
+    allowTap: !touchNavigate,
+    singleAction: () => touchNavigate ? "navigate" : "edit",
+    navigate: (gesture) => {
+      const svg = svgRef.current;
+      const matrix = svg?.getScreenCTM();
+      if (!svg || !matrix) return;
+      const unitX = 1 / Math.max(0.0001, Math.hypot(matrix.a, matrix.b));
+      const unitY = 1 / Math.max(0.0001, Math.hypot(matrix.c, matrix.d));
+      const center = svg.createSVGPoint();
+      center.x = gesture.center.x;
+      center.y = gesture.center.y;
+      const anchor = center.matrixTransform(matrix.inverse());
+      const nextZoom = clamp(zoom * gesture.scale, 0.75, 6);
+      const ratio = zoom / nextZoom;
+      setZoom(nextZoom);
+      setPan({
+        x: clamp(anchor.x + (pan.x - gesture.dx * unitX - anchor.x) * ratio, -workspace.width / 2, workspace.width / 2),
+        z: clamp(anchor.y + (pan.z - gesture.dy * unitY - anchor.y) * ratio, -workspace.depth / 2, workspace.depth / 2),
+      });
+      setHover(null);
+    },
+  });
 
   const pointFromEvent = (event: { clientX: number; clientY: number }, magnetic = true) => {
     const svg = svgRef.current;
@@ -973,10 +1003,10 @@ export function SketchWorkspace({
     );
   })() : null;
   const labelOffset = 22 * screenUnit;
-  const pointRadius = 5 * screenUnit;
-  const controlPointRadius = 6 * screenUnit;
+  const pointRadius = (touchAvailable ? 9 : 5) * screenUnit;
+  const controlPointRadius = (touchAvailable ? 12 : 6) * screenUnit;
   const hoverPointRadius = 5 * screenUnit;
-  const handleSize = 12 * screenUnit;
+  const handleSize = (touchAvailable ? 24 : 12) * screenUnit;
   const handleRadius = 2 * screenUnit;
   const selectedImageBounds = selectedImage ? {
     minX: selectedImage.x - selectedImage.width / 2,
@@ -1007,6 +1037,7 @@ export function SketchWorkspace({
 
   return (
     <main className="sketch-workspace-stage">
+      {touchAvailable ? <TouchControls sketch navigate={touchNavigate} onNavigateChange={setTouchNavigate} history={touchHistory} /> : null}
       <div className="sketch-mode-badge">{operation === "revolve" ? "Revolve sketch" : "Sketch view"} - {planeName}</div>
       {operation === "extrude" && regions.length > 0 ? (
         <div className="sketch-profile-selection-status">

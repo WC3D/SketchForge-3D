@@ -1,7 +1,7 @@
 "use client";
 
 import { Boxes, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Eye, EyeOff, Group, Lock, Search, SlidersHorizontal, Trash2, Ungroup, Unlock } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { shapeFeatureEnabled, shapeFeatureKinds } from "@/lib/shapeFeatureToggles";
 import type { ShapeFeatureKind, WorkplaneShape } from "@/types/sketchforge";
 
@@ -79,6 +79,9 @@ export function SceneOverviewSidebar({
   onShapeInspectorExpand?: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    if (window.matchMedia("(max-width: 760px)").matches) setCollapsed(true);
+  }, []);
   const [query, setQuery] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const normalizedQuery = query.trim().toLowerCase();

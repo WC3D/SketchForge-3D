@@ -33,6 +33,9 @@ import { parseMeasurementInput } from "@/lib/measurementUnits";
 import type { ModelSplitPlane } from "@/lib/modelSplit";
 import type { SculptBrushSettings, SculptPoint } from "@/lib/sculptBrush";
 import { SculptStroke } from "@/lib/sculptStroke";
+import { navigateTouchCamera } from "@/lib/touchCamera";
+import { useTouchNavigation } from "@/components/useTouchNavigation";
+import { TouchControls, type TouchHistory } from "@/components/TouchControls";
 import { releaseSculptGeometry, restoreSculptGeometry, retainSculptGeometry, SCULPT_EDGE_TRIANGLE_LIMIT, SCULPT_SELECTED_EDGE_ANGLE } from "@/lib/sculptGeometry";
 import { copySculptNumbers } from "@/lib/sculptTransfer";
 import type { SculptRequest, SculptResponse } from "@/workers/sculpt.worker";
@@ -230,6 +233,7 @@ type WorkplaneViewportProps = {
   onSeparateParts?: () => void;
   onUpdateShape: (id: string, patch: ShapeUpdatePatch) => void;
   sculptSettings?: SculptBrushSettings | null;
+  touchHistory?: TouchHistory;
   shapeInspectorCollapsed?: boolean;
   onShapeInspectorCollapsedChange?: (collapsed: boolean) => void;
   onWorkspaceSettingsChange?: (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
@@ -2482,6 +2486,7 @@ export function WorkplaneViewport({
   onSeparateParts,
   onUpdateShape,
   sculptSettings = null,
+  touchHistory,
   shapeInspectorCollapsed = false,
   onShapeInspectorCollapsedChange,
   onWorkspaceSettingsChange,
@@ -2548,6 +2553,9 @@ export function WorkplaneViewport({
   const marqueeRef = useRef<MarqueeState | null>(null);
   const transformRef = useRef<TransformDragState | null>(null);
   const sculptDragRef = useRef<SculptDragState | null>(null);
+  const [touchNavigate, setTouchNavigate] = useState(false);
+  const [touchMultiSelect, setTouchMultiSelect] = useState(false);
+  const touchCameraActiveRef = useRef(false);
   const sculptStrokeRef = useRef<{ queue: SculptStroke<{ clientX: number; clientY: number }>; worker: Worker; targetId: string } | null>(null);
   const sculptCursorFrameRef = useRef<number | null>(null);
   const sculptPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
@@ -4839,7 +4847,7 @@ export function WorkplaneViewport({
       if (!alreadySelected) {
         onSelectShape(id);
       }
-      if (!canBeginShapeDrag(workspaceRef.current.selectBeforeMove, alreadySelected)) {
+      if (!canBeginShapeDrag(workspaceRef.current.selectBeforeMove || event.pointerType === "touch", alreadySelected)) {
         return;
       }
       if (shape.locked) {
@@ -5202,6 +5210,59 @@ export function WorkplaneViewport({
     [clearMoveDimensions, onInteractionActiveChange, onSelectShape, onUpdateShape, rememberResizeAnchor, setMarqueeFromState, shapesInMarquee, suppressLiftEditAfterDrag],
   );
 
+  const cancelTouchInteraction = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") { finishDrag(event); return; }
+    stopSculptStroke();
+    const state = threeRef.current;
+    const drag = dragRef.current;
+    if (drag && state) {
+      for (const item of drag.items) {
+        item.nextX = item.startX;
+        item.nextZ = item.startZ;
+        item.nextElevation = item.startElevation;
+        applyDragItemPreview(state, item);
+        if (item.visual) setComplexEdgeVisibility(item.visual, true);
+      }
+    }
+    dragRef.current = null;
+    marqueeRef.current = null;
+    setMarqueeFromState(null);
+    clearMoveDimensions();
+    if (state) { state.controls.enabled = true; state.needsRender = true; }
+    onInteractionActiveChange?.(false);
+  }, [clearMoveDimensions, finishDrag, onInteractionActiveChange, setMarqueeFromState, stopSculptStroke]);
+
+  const touchAvailable = useTouchNavigation(hostRef, {
+    resetKey: `${rendererRetry}:${touchNavigate}:${touchMultiSelect}:${Boolean(sculptSettings)}:${workplaneMode}:${modifierActive}:${splitActive}`,
+    allowTap: !touchNavigate && !splitActive,
+    additive: touchMultiSelect && !sculptSettings,
+    blocked: () => Boolean(transformRef.current || rulerPointDragRef.current),
+    singleAction: (event) => {
+      if (touchNavigate || splitActive || (touchMultiSelect && !sculptSettingsRef.current)) return "navigate";
+      if (sculptSettingsRef.current || workplaneModeRef.current || modifierActiveRef.current || rulerModeRef.current) return "edit";
+      const id = pickShape(event.clientX, event.clientY);
+      return id && selectedIdsRef.current.includes(id) ? "edit" : "navigate";
+    },
+    navigate: (gesture) => {
+      const state = threeRef.current;
+      if (!state) return;
+      touchCameraActiveRef.current = true;
+      state.controls.enabled = false;
+      state.controls.enableDamping = false;
+      navigateTouchCamera(state.camera, state.controls.target, gesture, state.renderer.domElement.clientHeight);
+      state.controls.update();
+      state.needsRender = true;
+    },
+    idle: () => {
+      const state = threeRef.current;
+      if (!state || !touchCameraActiveRef.current) return;
+      touchCameraActiveRef.current = false;
+      state.controls.enableDamping = true;
+      state.controls.enabled = !sculptStrokeRef.current && !dragRef.current && !transformRef.current;
+      state.needsRender = true;
+    },
+  });
+
   const handleDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -5553,6 +5614,7 @@ export function WorkplaneViewport({
 
   return (
     <main className={`workplane-stage ${challengeTutorial ? `key-tag-tutorial-active ${challengeTutorialCollapsed ? "key-tag-tutorial-collapsed" : ""}` : ""}`}>
+      {touchAvailable ? <TouchControls navigate={touchNavigate} onNavigateChange={setTouchNavigate} multiSelect={touchMultiSelect} onMultiSelectChange={sculptSettings ? undefined : setTouchMultiSelect} history={touchHistory} /> : null}
       <div className="view-cube" aria-label="View orientation cube" onPointerDown={(event) => event.stopPropagation()}>
         <div className="view-cube-inner" ref={viewCubeRef}>
           <button type="button" className="cube-face cube-top" aria-label="Bottom view" aria-keyshortcuts="6" title="Bottom view (6)" onClick={() => setViewCubeFace("bottom")}>BOTTOM</button>
@@ -5647,7 +5709,7 @@ export function WorkplaneViewport({
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={finishDrag}
-            onPointerCancel={finishDrag}
+            onPointerCancel={cancelTouchInteraction}
             onPointerLeave={handlePointerLeave}
           />
           {rendererError ? (
@@ -5672,7 +5734,7 @@ export function WorkplaneViewport({
               onCommit={commitMoveDimension}
             />
           ) : null}
-          {!workplaneMode && !splitActive && !sculptSettings && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive ? (
+          {!workplaneMode && !splitActive && !sculptSettings && !(touchAvailable && touchNavigate) && transformOverlay && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !modifierActive ? (
             <TransformOverlay
               box={transformOverlay}
               measureKey={pinnedMeasureKey ?? hoverMeasureKey}
@@ -5813,6 +5875,9 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
     MIDDLE: THREE.MOUSE.PAN,
     RIGHT: THREE.MOUSE.ROTATE,
   };
+  // Touch is arbitrated before tool handlers by useTouchNavigation. Letting
+  // OrbitControls also interpret it would rotate while selecting or brushing.
+  controls.touches = { ONE: null, TWO: null };
   controls.minDistance = 18;
   controls.maxDistance = 4200;
   controls.minZoom = 0.02;

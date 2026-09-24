@@ -97,6 +97,7 @@ import type { SculptBrushKind } from "@/lib/sculptBrush";
 import { removeShapeFeature, shapeWithFeatureToggles, withShapeFeatureEnabled } from "@/lib/shapeFeatureToggles";
 import { geometryRotationDegreesForShortcut, geometryRotationDelta, rotatedGeometryShapePatch } from "@/lib/geometryRotation";
 import { createKeyboardMovementInteraction, isMovementKey, moveShapesByKeyboard } from "@/lib/keyboardMovement";
+import { useToolbarMenuPosition } from "@/components/useToolbarMenuPosition";
 import { createLocalId } from "@/lib/localIds";
 import { unionSplitManifoldComponents } from "@/lib/manifoldSplit";
 import { modelSplitPlane, splitPlaneIntersectsPoints, splitShapeFromWorldPositions, type ModelSplitPlane } from "@/lib/modelSplit";
@@ -11026,6 +11027,7 @@ export function SketchForgeEditor({
         {toolbarMode === "sketch" && sketchActive ? (
           <>
             <SketchWorkspace
+              touchHistory={{ undo: sketchUndo, redo: sketchRedo, canUndo: sketchHistoryIndex > 0, canRedo: sketchHistoryIndex < sketchHistory.length - 1 }}
             profile={sketchProfile}
             operation={sketchOperation}
             selectedRegionIds={selectedSketchRegionIds}
@@ -11147,6 +11149,7 @@ export function SketchForgeEditor({
           </>
         ) : (
           <WorkplaneViewport
+            touchHistory={{ undo, redo, canUndo: !splitSession && !projectInteractionActive && (historyIndex > 0 || Boolean(edgeModifier)), canRedo: !splitSession && !projectInteractionActive && historyIndex < history.length - 1 }}
             theme={activeTheme}
             externalWorkspace={workspaceSettings}
           shapes={viewportShapes}
@@ -11800,10 +11803,12 @@ function SecondaryToolbar({
   const [shapesOpen, setShapesOpen] = useState(false);
   const [sketchCreateOpen, setSketchCreateOpen] = useState(false);
   const [visibilityOpen, setVisibilityOpen] = useState(false);
-  const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
   const shapesMenuRef = useRef<HTMLDivElement>(null);
   const sketchCreateMenuRef = useRef<HTMLDivElement>(null);
   const visibilityMenuRef = useRef<HTMLDivElement>(null);
+  const shapesMenuPosition = useToolbarMenuPosition(shapesOpen, shapesMenuRef, 264);
+  const sketchCreateMenuPosition = useToolbarMenuPosition(sketchCreateOpen, sketchCreateMenuRef, 280);
+  const visibilityMenuPosition = useToolbarMenuPosition(visibilityOpen, visibilityMenuRef, 276);
   const touchShapeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const suppressNextShapeClickRef = useRef(false);
   const cancelProjectNameEditRef = useRef(false);
@@ -11893,37 +11898,17 @@ function SecondaryToolbar({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setVisibilityOpen(false);
     };
-    const closeOnViewportChange = () => setVisibilityOpen(false);
     window.addEventListener("pointerdown", closeOnPointerDown);
     window.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("resize", closeOnViewportChange);
-    window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
       window.removeEventListener("pointerdown", closeOnPointerDown);
       window.removeEventListener("keydown", closeOnEscape);
-      window.removeEventListener("resize", closeOnViewportChange);
-      window.removeEventListener("scroll", closeOnViewportChange, true);
     };
   }, [visibilityOpen]);
   const toggleVisibilityMenu = () => {
     if (visibilityOpen) {
       setVisibilityOpen(false);
       return;
-    }
-    const triggerBounds = visibilityMenuRef.current?.getBoundingClientRect();
-    if (triggerBounds) {
-      const viewportGutter = 12;
-      const menuWidth = Math.min(276, Math.max(0, window.innerWidth - viewportGutter * 2));
-      setVisibilityMenuPosition({
-        top: triggerBounds.bottom + 8,
-        left: Math.max(
-          viewportGutter,
-          Math.min(
-            triggerBounds.left + triggerBounds.width / 2 - menuWidth / 2,
-            window.innerWidth - menuWidth - viewportGutter,
-          ),
-        ),
-      });
     }
     setShapesOpen(false);
     setSketchCreateOpen(false);
@@ -12030,7 +12015,7 @@ function SecondaryToolbar({
             </button>
           </div>
           {shapesOpen ? (
-            <div className="shape-menu-dropdown">
+            <div className="shape-menu-dropdown" style={shapesMenuPosition}>
               <div className="shape-menu-title">Basic Shapes</div>
               <div className="shape-menu-list">
                 {toolbarShapeAssets.map((shape) => (
@@ -12047,12 +12032,12 @@ function SecondaryToolbar({
                       addShapeFromMenu(shape);
                     }}
                     onPointerDown={(event) => {
-                      if (event.pointerType === "touch") {
+                      if (event.pointerType === "touch" || event.pointerType === "pen") {
                         touchShapeStartRef.current = { id: shape.id, x: event.clientX, y: event.clientY };
                       }
                     }}
                     onPointerUp={(event) => {
-                      if (event.pointerType !== "touch") {
+                      if (event.pointerType !== "touch" && event.pointerType !== "pen") {
                         return;
                       }
                       const start = touchShapeStartRef.current;
@@ -12067,6 +12052,7 @@ function SecondaryToolbar({
                       }, 350);
                       addShapeFromMenu(shape);
                     }}
+                    onPointerCancel={() => { touchShapeStartRef.current = null; }}
                     onTouchStart={(event) => {
                       const touch = event.changedTouches[0];
                       if (touch) {
@@ -12273,7 +12259,7 @@ function SecondaryToolbar({
                     </button>
                   </div>
                   {shapesOpen ? (
-                    <div className="shape-menu-dropdown sketch-shape-menu-dropdown" role="menu" aria-label="Sketch shapes">
+                    <div className="shape-menu-dropdown sketch-shape-menu-dropdown" role="menu" aria-label="Sketch shapes" style={shapesMenuPosition}>
                       <div className="shape-menu-title">Sketch Shapes</div>
                       <div className="shape-menu-list">
                         {sketchShapeMenuItems.map(({ primitive, label, icon: Icon }) => (
@@ -12401,7 +12387,7 @@ function SecondaryToolbar({
                       <ToolbarCaretDownIcon className="sketch-create-menu-chevron" />
                     </button>
                     {sketchCreateOpen ? (
-                      <div className="sketch-create-dropdown" role="menu" aria-label="Sketch to 3D method">
+                      <div className="sketch-create-dropdown" role="menu" aria-label="Sketch to 3D method" style={sketchCreateMenuPosition}>
                         <button type="button" role="menuitem" onClick={() => startSketch("extrude")}>
                           <strong>Extrude sketch</strong>
                           <span>Raise the profile into a 3D shape</span>
