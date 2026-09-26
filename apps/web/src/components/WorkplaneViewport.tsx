@@ -35,7 +35,7 @@ import type { SculptBrushSettings, SculptPoint } from "@/lib/sculptBrush";
 import { SculptStroke } from "@/lib/sculptStroke";
 import { navigateTouchCamera } from "@/lib/touchCamera";
 import { useTouchNavigation } from "@/components/useTouchNavigation";
-import { TouchControls, type TouchHistory } from "@/components/TouchControls";
+import { TouchControls } from "@/components/TouchControls";
 import { releaseSculptGeometry, restoreSculptGeometry, retainSculptGeometry, SCULPT_EDGE_TRIANGLE_LIMIT, SCULPT_SELECTED_EDGE_ANGLE } from "@/lib/sculptGeometry";
 import { copySculptNumbers } from "@/lib/sculptTransfer";
 import type { SculptRequest, SculptResponse } from "@/workers/sculpt.worker";
@@ -233,7 +233,6 @@ type WorkplaneViewportProps = {
   onSeparateParts?: () => void;
   onUpdateShape: (id: string, patch: ShapeUpdatePatch) => void;
   sculptSettings?: SculptBrushSettings | null;
-  touchHistory?: TouchHistory;
   shapeInspectorCollapsed?: boolean;
   onShapeInspectorCollapsedChange?: (collapsed: boolean) => void;
   onWorkspaceSettingsChange?: (settings: { workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => void;
@@ -2486,7 +2485,6 @@ export function WorkplaneViewport({
   onSeparateParts,
   onUpdateShape,
   sculptSettings = null,
-  touchHistory,
   shapeInspectorCollapsed = false,
   onShapeInspectorCollapsedChange,
   onWorkspaceSettingsChange,
@@ -5614,7 +5612,7 @@ export function WorkplaneViewport({
 
   return (
     <main className={`workplane-stage ${challengeTutorial ? `key-tag-tutorial-active ${challengeTutorialCollapsed ? "key-tag-tutorial-collapsed" : ""}` : ""}`}>
-      {touchAvailable ? <TouchControls navigate={touchNavigate} onNavigateChange={setTouchNavigate} multiSelect={touchMultiSelect} onMultiSelectChange={sculptSettings ? undefined : setTouchMultiSelect} history={touchHistory} /> : null}
+      {touchAvailable ? <TouchControls navigate={touchNavigate} onNavigateChange={setTouchNavigate} multiSelect={touchMultiSelect} onMultiSelectChange={sculptSettings ? undefined : setTouchMultiSelect} /> : null}
       <div className="view-cube" aria-label="View orientation cube" onPointerDown={(event) => event.stopPropagation()}>
         <div className="view-cube-inner" ref={viewCubeRef}>
           <button type="button" className="cube-face cube-top" aria-label="Bottom view" aria-keyshortcuts="6" title="Bottom view (6)" onClick={() => setViewCubeFace("bottom")}>BOTTOM</button>

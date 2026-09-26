@@ -11027,7 +11027,6 @@ export function SketchForgeEditor({
         {toolbarMode === "sketch" && sketchActive ? (
           <>
             <SketchWorkspace
-              touchHistory={{ undo: sketchUndo, redo: sketchRedo, canUndo: sketchHistoryIndex > 0, canRedo: sketchHistoryIndex < sketchHistory.length - 1 }}
             profile={sketchProfile}
             operation={sketchOperation}
             selectedRegionIds={selectedSketchRegionIds}
@@ -11149,7 +11148,6 @@ export function SketchForgeEditor({
           </>
         ) : (
           <WorkplaneViewport
-            touchHistory={{ undo, redo, canUndo: !splitSession && !projectInteractionActive && (historyIndex > 0 || Boolean(edgeModifier)), canRedo: !splitSession && !projectInteractionActive && historyIndex < history.length - 1 }}
             theme={activeTheme}
             externalWorkspace={workspaceSettings}
           shapes={viewportShapes}
@@ -12163,6 +12161,10 @@ function SecondaryToolbar({
           </>
         ) : toolbarMode === "sculpt" ? (
           <div className="sculpt-toolbar-ribbon" aria-label="Sculpt toolbar">
+            <div className="toolbar-section compact">
+              <div className="toolbar-section-label">History</div>
+              <div className="toolbar-section-tools">{leftTools.filter((tool) => tool.label === "Undo" || tool.label === "Redo").map(renderToolButton)}</div>
+            </div>
             <div className="toolbar-section sculpt-target-section">
               <div className="toolbar-section-label">Sculpt</div>
               <div className="sculpt-toolbar-target">

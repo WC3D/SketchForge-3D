@@ -10,6 +10,9 @@
   "desktopName": "sketchforge",
   "main": "apps/desktop/main.cjs",
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "copy:occt": "node scripts/copy-occt-wasm.mjs",
     "predev": "npm run copy:occt",
@@ -46,10 +49,12 @@
     "lucide-react": "^0.511.0",
     "manifold-3d": "^3.5.1",
     "next": "^16.3.3",
+    "node-gyp": "^12.4.0",
     "occt-wasm": "^3.6.1",
     "react": "^19.1.0",
     "react-colorful": "^5.8.0",
     "react-dom": "^19.1.0",
+    "rebuild": "^0.1.2",
     "tailwind-merge": "^3.3.0",
     "tailwindcss": "^4.1.8",
     "three": "^0.184.0",
@@ -72,5 +77,10 @@
     "next": {
       "postcss": "8.5.23"
     }
+  },
+  "allowScripts": {
+    "node-gyp@12.4.0": true,
+    "electron-winstaller@5.4.0": false,
+    "fsevents@2.3.3": false
   }
 }

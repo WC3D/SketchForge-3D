@@ -30,7 +30,7 @@ For the local printing workflow: design in SketchForge, export STL or 3MF to the
 | Multi button | Toggle individual objects in/out of the selection by tapping |
 | Edit in Sculpt | Drag to brush or tap for one dab |
 | Draw in Sketch | Use the active drawing/selection tool with one finger |
-| Curved-arrow buttons | Undo/redo the current geometry or sketch history |
+| Top toolbar undo/redo | Undo/redo the current geometry or sketch history |
 | ? button | Show gesture help |
 
 The first finger is held pending until it moves beyond an 8-pixel threshold or is released. A second finger takes over navigation, so an ordinary pinch does not start a brush stroke or place a sketch point. An unfinished drag preview is cancelled on takeover; brush changes already applied remain undoable, and pending worker results are cancelled. Navigation keeps ownership until all fingers lift. Finish a resize/rotate handle adjustment before starting a camera gesture.
@@ -41,10 +41,11 @@ Pen contacts are explicitly captured for the active tool and suppress native bro
 
 - Tool ribbons scroll horizontally rather than squeezing their icons.
 - Tablet title rows reserve the full touch-button height, including at widths above the phone breakpoint. Dropdowns are fixed to the visible viewport below their toolbar section so scrolling the ribbon cannot clip them.
-- Coarse-pointer devices get larger buttons, handles, and sketch point targets.
+- Coarse-pointer devices use compact 36-pixel toolbar buttons and 22-pixel object handles (half the original mobile alpha's 44-pixel handles). Sketch point targets remain enlarged for touch.
+- The mobile title row and tool ribbon together use 100 CSS pixels, plus the device's top safe area. Sizing follows the browser viewport in CSS pixels rather than the screen's physical pixel resolution or DPI.
 - The scene inspector starts collapsed on compact screens.
-- Phone shape properties use a scrollable lower panel with a visible collapse control.
-- Touch controls and undo/redo remain available in geometry, sketch, and sculpt views.
+- Phone shape properties use a narrower, scrollable lower panel, capped at 26% of the viewport height or 220 CSS pixels, with a compact header and visible collapse control. Wide landscape phones also get a narrower inspector.
+- Touch controls remain available in geometry, sketch, and sculpt views. Undo/redo are in the top toolbar rather than duplicated in the floating touch panel.
 - Dynamic viewport height, safe-area spacing, and readable input sizes accommodate mobile browsers without disabling page zoom outside the drawing surfaces.
 
 ## Validation

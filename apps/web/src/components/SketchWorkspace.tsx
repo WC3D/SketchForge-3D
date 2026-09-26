@@ -4,7 +4,7 @@ import { ChevronUp, CornerDownRight, Home, Link, Link2Off, LockKeyhole, LockKeyh
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { SnapGridControl } from "@/components/workplane/ShapeInspector";
 import { SketchRevolvePreview } from "@/components/SketchRevolvePreview";
-import { TouchControls, type TouchHistory } from "@/components/TouchControls";
+import { TouchControls } from "@/components/TouchControls";
 import { useTouchNavigation } from "@/components/useTouchNavigation";
 import { parseMeasurementInput } from "@/lib/measurementUnits";
 import { WORKPLANE_MAJOR_GRID_INTERVAL } from "@/lib/workplaneGrid";
@@ -68,7 +68,6 @@ type SketchWorkspaceProps = {
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
   planeName?: string;
-  touchHistory?: TouchHistory;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
   onAddPrimitive: (primitive: SketchPrimitive, center: { x: number; z: number }) => void;
   onPointPress: (id: string) => void;
@@ -529,7 +528,6 @@ export function SketchWorkspace({
   initialSnap,
   initialWorkspace,
   planeName = "Base XZ plane",
-  touchHistory,
   onPlanePoint,
   onAddPrimitive,
   onPointPress,
@@ -1037,7 +1035,7 @@ export function SketchWorkspace({
 
   return (
     <main className="sketch-workspace-stage">
-      {touchAvailable ? <TouchControls sketch navigate={touchNavigate} onNavigateChange={setTouchNavigate} history={touchHistory} /> : null}
+      {touchAvailable ? <TouchControls sketch navigate={touchNavigate} onNavigateChange={setTouchNavigate} /> : null}
       <div className="sketch-mode-badge">{operation === "revolve" ? "Revolve sketch" : "Sketch view"} - {planeName}</div>
       {operation === "extrude" && regions.length > 0 ? (
         <div className="sketch-profile-selection-status">

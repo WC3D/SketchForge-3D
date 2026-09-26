@@ -8,7 +8,7 @@
         <h1 align="right">SketchForge</h1>
         <h3 align="right">A local-first 3D design editor that runs in your browser.</h3>
         <p align="right">
-          Build shapes, cut holes, group parts, import STL files, and export models without accounts, cloud lock-in, or heavyweight CAD setup.
+          Sketch profiles, build shapes, sculpt meshes, cut holes, and exchange models without accounts, cloud lock-in, or heavyweight CAD setup.
         </p>
       </td>
     </tr>
@@ -20,6 +20,7 @@
     <a href="https://github.com/sponsors/Formsmith746"><img alt="Sponsor SketchForge on GitHub" src="https://img.shields.io/badge/GitHub-Sponsor-ea4aaa?logo=githubsponsors&logoColor=white"></a>
     <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
     <img alt="Version v1.0.9" src="https://img.shields.io/badge/version-v1.0.9-2563eb">
+    <a href="docs/MOBILE_ALPHA.md"><img alt="Mobile support: alpha" src="https://img.shields.io/badge/mobile-alpha-f59e0b"></a>
   </p>
 </div>
 
@@ -31,12 +32,13 @@ SketchForge is a lightweight CAD-style workspace for people who want to sketch, 
 
 It is built for the satisfying loop: drop a shape, resize it, rotate it, make another shape a hole, group the result, import an STL if primitives are not enough, and export the finished model.
 
-No login. No server project storage. No heavyweight CAD install just to make a useful part.
+No login. Private projects autosave locally in your browser, with optional shared project storage on your own Docker server. No heavyweight CAD install just to make a useful part.
 
 ## What It Does
 
 - **2D Sketching & Parametric Profiles** - draw parametric lines, bezier curves, circles, rectangles, polygons, and text with constraints, distance dimensions, region selections, and revolve/extrude/sweep operations.
 - **Local-first projects** - designs live in browser storage with generated project thumbnails.
+- **Editable SKF project packages** - back up and transfer projects with their editable objects, imported assets, and available undo/redo history; optionally save to a shared Docker library.
 - **Real 3D workplane** - grid, camera controls, snap settings, transform handles, outlines, and inspector controls.
 - **Associative construction planes** - create offset, angled, flipped, face-attached, and midplanes for sketches away from the base workplane.
 - **Primitive shape library** - boxes, cylinders, spheres, cones, pyramids, wedges, text, roofs, half spheres, torus shapes, tubes, and more.
@@ -44,13 +46,36 @@ No login. No server project storage. No heavyweight CAD install just to make a u
 - **Boolean Intersection** - keep only the geometry where selected solid and hole shapes overlap.
 - **Reversible edge tools** - chamfer and fillet selected CAD edges, with history controls for removing applied edge features.
 - **Rotated solid edge treatment** - chamfer and fillet preserve analytic box topology after one-, two-, or three-axis rotations.
+- **Mesh sculpting** - Add, Subtract, and Smooth brushes with adjustable radius and strength, local remeshing, and undoable strokes processed in a background worker.
+- **Scene overview** - search shapes and features, inspect groups, control visibility, locking, and hole state, and toggle or remove supported features.
+- **Placement and navigation tools** - align, mirror, center selections on the workplane, focus the camera on a selection, and move objects using the snap grid.
 - **3MF, STL, STEP, and SVG import** - bring outside models and vector profiles into the same workspace as primitives.
-- **3MF, STL, OBJ, STEP, and SVG workflows** - export selected objects or the whole scene, including print-ready 3MF packages and exact STEP/B-Rep geometry.
+- **3MF, STL, OBJ, STEP, and SVG workflows** - export selected objects or the whole scene, including print-ready 3MF packages and exact STEP/B-Rep geometry where available.
+- **Mobile support (alpha)** - touch-first geometry, sketch, and sculpt controls with compact phone/tablet layouts and pen input support.
 - **Fast browser stack** - Next.js, React, TypeScript, Three.js, and Manifold/CSG geometry tooling.
 
-### Camera projection shortcut
+### Camera and placement shortcuts
 
-Press **O** in the editor to switch between perspective and orthographic projection. The current view direction and framing are preserved when switching.
+- Press **O** to switch between perspective and orthographic projection while preserving view direction and framing.
+- Press **Shift+F** to focus the camera on the selection.
+- Use **Center on workplane** to center the selected objects on the build plate without changing their elevation.
+- Press **R** to rotate selected objects by 45 degrees around the active workplane normal, or **Shift+R** for 22.5 degrees.
+- Arrow-key movement follows the snap grid; **Ctrl/Cmd+arrow** changes elevation. Holding a movement key produces one undo step when released.
+- Duplicating an object keeps it at the source object's exact position, ready to move or edit.
+
+### Sculpting and scene management
+
+Select one unlocked solid and open **Sculpt**. Choose **Add**, **Subtract**, or **Smooth**, adjust the brush radius and strength, then drag over the surface. Each completed drag is one undoable stroke. Sculpting converts the object to a mesh and retains its source for reversible sculpt changes.
+
+The **Scene** sidebar provides a searchable object/group overview. Selected objects expose visibility, lock, and hole controls, plus supported feature controls for fillet/chamfer, sculpt changes, sketch output, and group/intersection results.
+
+### Project files and autosave
+
+Private projects autosave in IndexedDB for the browser and site address you use. Export a **`.skf`** package to back up an editable project or move it between browsers, computers, and mobile devices. Opening a package creates a new local project. Geometry exports such as STL and 3MF are separate from editable project backups.
+
+Current saves use **SKF format 2**, with deduplicated mesh/B-Rep/image assets and compact binary CAD display edges shared across history states. This reduces repeated autosave work and project storage. The reader still accepts format 1 packages, legacy JSON projects, and earlier JSON display-edge assets; new binary-edge saves require an updated reader.
+
+See the [SKF project format documentation](docs/SKF_PROJECT_FORMAT.md) for package structure, history options, and compatibility details.
 
 ### Construction planes
 
@@ -63,6 +88,30 @@ Open **Geometry > Workplane** to choose the active sketch plane or create a pers
 
 New angle and midplanes remain linked to their source planes. Select any listed plane as the active sketch plane before starting an extrude, revolve, or sweep sketch.
 
+## Mobile Support — Alpha
+
+SketchForge now includes **alpha mobile support** in the browser, with touch-first controls for phones and tablets. No separate mobile app or account is required. Tool ribbons scroll horizontally, menus stay within the viewport, touch targets are larger, and compact layouts use collapsible scene and shape-property panels.
+
+| Touch input | Behavior |
+| --- | --- |
+| Tap in Edit mode | Select an object; tap empty space to clear selection |
+| Drag an already-selected object | Move it in one undoable action |
+| Drag empty space or an unselected object | Orbit the 3D camera |
+| Two-finger drag / pinch | Pan / zoom |
+| View (Navigate) | Navigate with one finger without editing; pan in sketch view |
+| Multi | Toggle objects in or out of the selection by tapping |
+| Edit in Sculpt / Draw in Sketch | Brush the mesh / use the active sketch tool |
+| ? button | Show touch gesture help |
+| Top toolbar undo/redo | Access history without a keyboard |
+
+Pen input uses the active tool, and touch contacts are ignored while a pen is down. A second finger switches touch interaction to navigation; finish resize/rotate handle adjustments before starting a camera gesture.
+
+**Status:** this is an early alpha/MVP. Automated Chromium/WebKit menu checks and Chromium touch/pen checks are available, but physical-device validation is still needed, especially for iOS Safari, Android Chrome, styluses, on-screen numeric entry, and large meshes.
+
+To try it, open your Docker server's LAN address on a device on the same network, or start a development server with `npm run dev -- --hostname 0.0.0.0 --port 3001` and visit `http://<computer-LAN-IP>:3001`. Use `.skf` export/import to transfer editable projects. STL or 3MF exports can be downloaded and opened in a slicer; the alpha does not include direct slicer API integration.
+
+See [Mobile Alpha](docs/MOBILE_ALPHA.md) for setup, gesture details, and device-testing instructions.
+
 ## Demo
 
 ![SketchForge projects dashboard](https://sketchforge3d.com/assets/landing/project-dashboard.png)
@@ -73,16 +122,26 @@ New angle and midplanes remain linked to their source planes. Select any listed 
 
 ## Getting Started
 
-There are two common ways to run SketchForge. If you are not sure which one to choose, use Docker.
+Use the [hosted editor](https://sketchforge3d.com), install a desktop release, or run your own instance. Docker is the recommended self-hosted option.
 
 | Path | Best for | Difficulty |
 | --- | --- | --- |
+| Hosted browser editor | Try SketchForge without installing anything | Easiest |
+| Desktop release | Windows, macOS, and Linux desktop use | Easy |
 | Docker / FabLab server | Teachers, classrooms, shared computers, local network hosting | Recommended |
 | Local development | Developers who want to edit the code | Medium |
 
-SketchForge is local-first in both modes. The app files may be served from a computer or server, but projects stay in each user's browser storage. STL and OBJ exports download through the user's browser. SketchForge does not upload models to a SketchForge cloud service.
+SketchForge is local-first. Private projects stay in each user's browser storage, and model exports download through the browser. Docker users can explicitly save `.skf` files to their own server's shared project library. SketchForge does not upload models to a SketchForge cloud service.
 
-## macOS Desktop Release
+## Desktop Releases
+
+Desktop packaging supports a Windows x64 installer, macOS Intel/Apple Silicon DMGs, and Linux AppImages. Download the matching asset from [GitHub Releases](https://github.com/Formsmith746/SketchForge-3D/releases).
+
+- **Windows:** run the `SketchForge-Setup-…-x64.exe` installer.
+- **Linux:** mark the `.AppImage` executable in your file manager's permissions, then launch it.
+- **macOS:** follow the DMG instructions below.
+
+### macOS
 
 GitHub releases include macOS DMG files for Intel (`x64`) and Apple Silicon (`arm64`) Macs. Choose the file that matches your Mac.
 
@@ -111,7 +170,7 @@ Some macOS virtual machines do not provide hardware WebGL. Launch SketchForge wi
   --enable-unsafe-swiftshader
 ```
 
-### Download the Project
+## Download the Project
 
 If you already know Git:
 
@@ -311,7 +370,7 @@ Use this path if you want to edit SketchForge's code.
 
 ### What You Need
 
-- Node.js 20.9 or newer
+- Node.js 24 or newer (Node 24 LTS recommended; required by `brepjs`)
 - npm, included with Node.js
 
 Check your versions:
@@ -331,6 +390,8 @@ From the SketchForge project folder:
 npm install
 npm run dev
 ```
+
+If you use nvm, first run `nvm install` and `nvm use` in the project folder. The included `.nvmrc` selects Node 24. Older Node versions report an `EBADENGINE` warning for `brepjs`.
 
 Open:
 
@@ -367,6 +428,15 @@ Run tests:
 npm run test
 ```
 
+Run the mobile browser regression suite (separate from the unit tests):
+
+```bash
+npx playwright install chromium webkit
+npm run test:mobile
+```
+
+The suite uses a server on port 3000 or starts one automatically. See [Mobile Alpha validation](docs/MOBILE_ALPHA.md#validation) for custom server URLs and coverage.
+
 Start the local SketchForge MCP bridge for editor automation:
 
 ```bash
@@ -379,11 +449,35 @@ Create a production build:
 npm run build
 ```
 
-Build a static export:
+Build a static export on Windows Command Prompt:
 
 ```bash
 npm run export
 ```
+
+On macOS or Linux, use the equivalent environment-variable syntax:
+
+```bash
+npm run copy:occt
+STATIC_EXPORT=true npx next build apps/web --webpack
+npm run verify:static-worker-assets
+```
+
+Static hosting provides the browser editor; server-backed features such as the shared project library require a server deployment.
+
+Run or package the Electron desktop app:
+
+```bash
+npm run desktop:dev
+npm run desktop:dist
+```
+
+## Documentation
+
+- [User manual](docs/SKETCHFORGE_USER_MANUAL.md) — modeling, sketch tools, import/export, and shortcuts.
+- [Mobile Alpha](docs/MOBILE_ALPHA.md) — touch/pen controls, LAN setup, and validation status.
+- [SKF project format](docs/SKF_PROJECT_FORMAT.md) — editable project packages and reader compatibility.
+- [Changelog](docs/CHANGELOG.md) — release notes and unreleased persistence improvements.
 
 ## Contributing
 

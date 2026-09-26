@@ -21,6 +21,19 @@ for (const [width, height] of [[390, 844], [820, 1180], [1024, 768], [1366, 1024
       const tabs = await page.getByRole("tab").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().bottom));
       expect(tabs.every((bottom) => bottom <= ribbon!.y + 0.5)).toBe(true);
 
+      // Center hit tests alone miss artwork clipped at the ribbon's bottom.
+      // Check all icons, including horizontally off-screen Shapes/Manage tools.
+      const clippedTools = await page.locator(".toolbar-mode-content").evaluate((ribbon) => {
+        const bounds = ribbon.getBoundingClientRect();
+        return Array.from(ribbon.querySelectorAll(".toolbar-icon, .shape-menu-trigger, .action-buttons button"))
+          .filter((button) => [button, ...button.children].some((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.height > 0 && (rect.top < bounds.top - 0.5 || rect.bottom > bounds.bottom + 0.5);
+          }))
+          .map((button) => button.getAttribute("aria-label") ?? button.textContent);
+      });
+      expect(clippedTools).toEqual([]);
+
       await page.getByRole("button", { name: "Add shape", exact: true }).tap();
       const box = await exposedCenter(page.getByRole("button", { name: "Box", exact: true }));
       expect(box.exposed).toBe(true);

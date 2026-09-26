@@ -37,7 +37,7 @@ test("native pen edits, interruption cleanup, and palm rejection", async ({ page
   await pen("mouseReleased", point.x + 35, point.y + 20);
   const moved = await state();
   expect(moved.shapes[0].x !== 0 || moved.shapes[0].z !== 0).toBe(true);
-  await tap(page.getByRole("button", { name: "Touch undo", exact: true }));
+  await tap(page.getByRole("button", { name: "Undo", exact: true }));
   expect((await state()).shapes[0].x).toBe(0);
 
   point = await surfacePoint();
@@ -52,8 +52,8 @@ test("native pen edits, interruption cleanup, and palm rejection", async ({ page
   await pen("mousePressed", point.x, point.y);
   await pen("mouseReleased", point.x, point.y);
   await expect.poll(async () => (await state()).shapes[0].importedTriangles).toBeGreaterThan(triangles);
-  await expect(page.getByRole("button", { name: "Touch undo", exact: true })).toBeEnabled();
-  await tap(page.getByRole("button", { name: "Touch undo", exact: true }));
+  await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeEnabled();
+  await tap(page.getByRole("button", { name: "Undo", exact: true }));
   expect((await state()).shapes[0].importedTriangles).toBe(triangles);
 
   await tap(page.getByRole("tab", { name: "Sketch", exact: true }));
