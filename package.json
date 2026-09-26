@@ -73,6 +73,7 @@
     "vitest": "^4.1.11"
   },
   "overrides": {
+    "undici": "8.10.2",
     "sharp": "0.35.4",
     "next": {
       "postcss": "8.5.23"
