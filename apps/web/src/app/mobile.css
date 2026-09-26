@@ -40,6 +40,23 @@
 .touch-controls button:disabled { opacity: 0.4; }
 .touch-controls p { max-width: 360px; margin: 0; padding: 10px 12px; font-size: 13px; line-height: 1.5; border-top: 1px solid var(--border); }
 
+.sketch-arc-help {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 18;
+  max-width: calc(100% - 112px);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--foreground);
+  font-size: 12px;
+  text-align: center;
+}
+.sketch-arc-help button { margin-left: 8px; padding: 6px; color: var(--foreground); background: var(--tile); border-radius: 4px; }
+
 @media (any-pointer: coarse) {
   /* iPads can be wider than the phone breakpoint. Reserve the touch tab height
      at every touch viewport width, and use the visible browser height. */

@@ -12,6 +12,7 @@ import { closestPointOnSketchSegment, type SketchSegmentPlacement } from "@/lib/
 import { isSketchPanGesture } from "@/lib/sketchPointerControls";
 import { mirrorSign, resizedImportedMeshPositions } from "@/lib/workplaneShapes";
 import { circleFromPoints } from "@/lib/sketchCircles";
+import { arcFromThreePoints, arcSketchGeometry } from "@/lib/sketchArcs";
 import { moveConstrainedSketchPoint } from "@/lib/sketchConstraints";
 import { rectFromPoints } from "@/lib/sketchRectangles";
 import { polygonFromPoints } from "@/lib/sketchPolygons";
@@ -23,7 +24,7 @@ import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, norm
 import type { GridSize, SketchDimensionAnchor, SketchImage, SketchOperation, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 export type SketchPrimitive = "rectangle" | "circle" | "triangle" | "hexagon";
-export type SketchTool = "line" | "bezier" | "smooth" | "circle-center" | "circle-diameter" | "rect-corner" | "rect-center" | "poly-inscribed" | "poly-circumscribed" | "poly-edge" | "text" | SketchPrimitive | "select" | "refine" | "erase" | "dimension" | "measure";
+export type SketchTool = "line" | "bezier" | "arc-three-point" | "smooth" | "circle-center" | "circle-diameter" | "rect-corner" | "rect-center" | "poly-inscribed" | "poly-circumscribed" | "poly-edge" | "text" | SketchPrimitive | "select" | "refine" | "erase" | "dimension" | "measure";
 export type SketchCircleDraft = {
   tool: "circle-center" | "circle-diameter";
   first: { x: number; z: number };
@@ -70,6 +71,7 @@ type SketchWorkspaceProps = {
   planeName?: string;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
   onAddPrimitive: (primitive: SketchPrimitive, center: { x: number; z: number }) => void;
+  onAddArc: (geometry: ReturnType<typeof arcSketchGeometry>) => void;
   onPointPress: (id: string) => void;
   onSelectSegment: (id: string) => void;
   onSelectRegion: (id: string) => void;
@@ -528,9 +530,10 @@ export function SketchWorkspace({
   initialSnap,
   initialWorkspace,
   planeName = "Base XZ plane",
-  onPlanePoint,
+  onPlanePoint: onParentPlanePoint,
   onAddPrimitive,
-  onPointPress,
+  onAddArc,
+  onPointPress: onParentPointPress,
   onSelectSegment,
   onSelectRegion,
   onSelectAllRegions,
@@ -573,6 +576,37 @@ export function SketchWorkspace({
   const textInputRef = useRef<HTMLInputElement | null>(null);
   const [textDraftValue, setTextDraftValue] = useState("");
   const [pendingDimensionAnchor, setPendingDimensionAnchor] = useState<SketchDimensionAnchorCandidate | null>(null);
+  const [arcPoints, setArcPoints] = useState<{ x: number; z: number }[]>([]);
+  const [arcError, setArcError] = useState("");
+  useEffect(() => { setArcPoints([]); setArcError(""); }, [tool, profile]);
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setArcPoints([]); setArcError(""); }
+    };
+    window.addEventListener("keydown", cancel);
+    return () => window.removeEventListener("keydown", cancel);
+  }, []);
+  const onPlanePoint: SketchWorkspaceProps["onPlanePoint"] = (point, handles) => {
+    if (tool !== "arc-three-point") { onParentPlanePoint(point, handles); return; }
+    setArcError("");
+    if (arcPoints.length < 2) {
+      if (arcPoints[0] && Math.hypot(point.x - arcPoints[0].x, point.z - arcPoints[0].z) < 1e-4) {
+        setArcError("Choose a different end point");
+        return;
+      }
+      setArcPoints([...arcPoints, { x: point.x, z: point.z }]);
+      return;
+    }
+    const arc = arcFromThreePoints(arcPoints[0]!, arcPoints[1]!, point);
+    if (!arc) { setArcError("Move the third point away from the straight line between the endpoints"); return; }
+    onAddArc(arcSketchGeometry(arc));
+    setArcPoints([]);
+  };
+  const onPointPress = (id: string) => {
+    const point = profile.points.find((entry) => entry.id === id);
+    if (tool === "arc-three-point" && point) onPlanePoint(point);
+    else onParentPointPress(id);
+  };
   useEffect(() => {
     if (textDraft) {
       setTextDraftValue("");
@@ -869,7 +903,7 @@ export function SketchWorkspace({
     } else if (tool === "select") {
       event.currentTarget.setPointerCapture(event.pointerId);
       setPointerAction({ kind: "marquee", pointerId: event.pointerId, origin: point, current: point });
-    } else if (tool === "line" || tool === "smooth" || tool === "circle-center" || tool === "circle-diameter" || tool === "rect-corner" || tool === "rect-center" || tool === "poly-inscribed" || tool === "poly-circumscribed" || tool === "poly-edge" || tool === "text" || tool === "measure") {
+    } else if (tool === "arc-three-point" || tool === "line" || tool === "smooth" || tool === "circle-center" || tool === "circle-diameter" || tool === "rect-corner" || tool === "rect-center" || tool === "poly-inscribed" || tool === "poly-circumscribed" || tool === "poly-edge" || tool === "text" || tool === "measure") {
       onPlanePoint(point);
     }
   };
@@ -1275,14 +1309,14 @@ export function SketchWorkspace({
               <text x={hover.x + 12 * screenUnit} y={hover.z - 10 * screenUnit} fontSize={11 * screenUnit}>{hover.snap.label}</text>
             </g>
           ) : null}
-          <g className="sketch-profile-hit-targets" pointerEvents={tool === "select" ? "auto" : "none"}>
+          <g className="sketch-profile-hit-targets" pointerEvents={tool === "select" ? "stroke" : "none"}>
             {paths.filter((path) => path.closed).map((path) => (
               <path
                 key={`hit-${path.id}`}
                 data-sketch-entity="closed-profile"
                 d={pathData(path)}
                 onPointerDown={(event) => {
-                  if (event.button === 1) {
+                  if (isPanGesture(event)) {
                     beginPan(event);
                     return;
                   }
@@ -1335,7 +1369,7 @@ export function SketchWorkspace({
                     svgRef.current?.setPointerCapture(event.pointerId);
                     setPointerAction({ kind: "bezier", pointerId: event.pointerId, origin: point, current: point });
                   }
-                  else if (event.button === 0 && point && (["line", "smooth", "circle-center", "circle-diameter", "rect-corner", "rect-center", "poly-inscribed", "poly-circumscribed", "poly-edge", "text", "measure"] as SketchTool[]).includes(tool)) onPlanePoint(point);
+                  else if (event.button === 0 && point && (["arc-three-point", "line", "smooth", "circle-center", "circle-diameter", "rect-corner", "rect-center", "poly-inscribed", "poly-circumscribed", "poly-edge", "text", "measure"] as SketchTool[]).includes(tool)) onPlanePoint(point);
                   else if (event.button === 0 && tool === "select" && point) {
                     const closedPath = paths.find((path) => path.closed && path.steps.some((step) => step.segment.id === segment.id));
                     if (!closedPath) {
@@ -1563,6 +1597,17 @@ export function SketchWorkspace({
                   </>
                 );
               })()}
+            </g>
+          ) : null}
+          {tool === "arc-three-point" && arcPoints.length > 0 ? (
+            <g className="sketch-arc-preview" pointerEvents="none">
+              <path className="sketch-preview-line" d={(() => {
+                const start = arcPoints[0]!;
+                const end = arcPoints[1] ?? hover ?? start;
+                const arc = arcPoints[1] && hover ? arcFromThreePoints(start, end, hover) : null;
+                return arc ? `M ${start.x} ${start.z} A ${arc.radius} ${arc.radius} 0 ${Math.abs(arc.sweep) > Math.PI ? 1 : 0} ${arc.sweep > 0 ? 1 : 0} ${end.x} ${end.z}` : `M ${start.x} ${start.z} L ${end.x} ${end.z}`;
+              })()} fill="none" />
+              {arcPoints.map((point, index) => <circle key={index} className="sketch-cursor-point" cx={point.x} cy={point.z} r={hoverPointRadius} />)}
             </g>
           ) : null}
           {circleDraft && hover && circlePreview ? (
@@ -1830,6 +1875,10 @@ export function SketchWorkspace({
           {hover && (["line", "bezier", "smooth", "measure"] as SketchTool[]).includes(tool) ? <circle className="sketch-cursor-point" cx={hover.x} cy={hover.z} r={hoverPointRadius} pointerEvents="none" /> : null}
         </svg>
       </section>
+      {tool === "arc-three-point" ? <div className="sketch-arc-help" role="status">
+        {arcError || ["Arc: choose the start point", "Arc: choose the end point", "Arc: choose the height / bulge point"][arcPoints.length]}
+        {arcPoints.length > 0 ? <button type="button" onClick={() => { setArcPoints([]); setArcError(""); }}>Cancel arc</button> : null}
+      </div> : null}
       {textDraft ? (() => {
         const pos = svgToScreen(textDraft.position.x, textDraft.position.z);
         return (

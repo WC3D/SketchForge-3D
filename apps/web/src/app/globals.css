@@ -4597,6 +4597,16 @@ button {
   stroke: none;
 }
 
+/* These paths provide a generous outline drag target, not a second face fill.
+   Interior taps must reach the extrusion-region buttons underneath. */
+.sketch-profile-hit-targets path {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14px;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+
 .sketch-profile-fills path.selectable {
   fill: rgba(86, 173, 211, 0.09);
   cursor: pointer;
@@ -4604,12 +4614,12 @@ button {
 }
 
 .sketch-profile-fills path.selectable.selected {
-  fill: rgba(70, 156, 207, 0.24);
+  fill: rgba(70, 156, 207, 0.18);
 }
 
 .sketch-profile-fills path.selectable:hover,
 .sketch-profile-fills path.selectable:focus-visible {
-  fill: rgba(59, 177, 219, 0.32);
+  fill: rgba(59, 177, 219, 0.24);
   outline: none;
 }
 

@@ -102,6 +102,7 @@ import { createLocalId } from "@/lib/localIds";
 import { unionSplitManifoldComponents } from "@/lib/manifoldSplit";
 import { modelSplitPlane, splitPlaneIntersectsPoints, splitShapeFromWorldPositions, type ModelSplitPlane } from "@/lib/modelSplit";
 import { circleFromPoints, circleSketchGeometry } from "@/lib/sketchCircles";
+import { appendSketchArc } from "@/lib/sketchArcs";
 import { moveConstrainedSketchPoint, pruneSketchParameters, setSketchPointFixed, setSketchSegmentConstraint, setSketchSegmentLength, solveSketchProfile } from "@/lib/sketchConstraints";
 import { rectFromPoints, rectangleSketchGeometry } from "@/lib/sketchRectangles";
 import { textSketchGeometry } from "@/lib/sketchTextGeometry";
@@ -7409,6 +7410,7 @@ export function SketchForgeEditor({
     const messages: Record<SketchTool, string> = {
       line: "Line: click points to draw straight segments",
       bezier: "Bézier: click and drag points to pull curve handles",
+      "arc-three-point": "Three-point arc: choose start, end, then the height / bulge point",
       smooth: "Smooth curve: click points to build a flowing path",
       "circle-center": "Center circle: choose the center, then a radius point",
       "circle-diameter": "Two-point circle: choose opposite points on the diameter",
@@ -11045,6 +11047,16 @@ export function SketchForgeEditor({
             initialWorkspace={workspaceSettings}
             planeName={sketchConstructionPlaneId === BASE_CONSTRUCTION_PLANE_ID ? "Base XZ plane" : constructionPlanes.find((plane) => plane.id === sketchConstructionPlaneId)?.name ?? "Construction plane"}
             onPlanePoint={addSketchPlanePoint}
+            onAddArc={(arc) => {
+              const next = appendSketchArc(sketchProfile, arc);
+              const segmentIds = arc.segments.map((segment) => segment.id);
+              const pointIds = [...new Set(next.segments.filter((segment) => segmentIds.includes(segment.id)).flatMap((segment) => [segment.startId, segment.endId]))];
+              const closed = orderedSketchPaths(next).some((path) => path.closed && path.steps.some((step) => segmentIds.includes(step.segment.id)));
+              commitSketchProfile(next, closed ? "Arc profile closed—edit the path or finish the sketch" : "Three-point arc added");
+              setSketchActivePointId(null);
+              setSketchSelection({ kind: "multiple", pointIds, segmentIds });
+              if (closed) setSketchTool("select");
+            }}
             onAddPrimitive={addSketchPrimitive}
             onPointPress={pressSketchPoint}
             onSelectSegment={(id) => {
@@ -12206,8 +12218,19 @@ function SecondaryToolbar({
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "line" ? "active" : ""}`} type="button" aria-label="Line" title="Line" onClick={() => onSketchTool("line")}>
                       <SketchReferenceIcon name="line" />
                     </button>
-                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "bezier" ? "active" : ""}`} type="button" aria-label="Bezier Curve" title="Bezier Curve" onClick={() => onSketchTool("bezier")}>
-                      <SketchReferenceIcon name="bezier" />
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "bezier" ? "active" : ""}`} type="button" aria-label="Bezier Curve" title="Bézier Curve — drag points to set tangent handles" onClick={() => onSketchTool("bezier")}>
+                      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M6 30 12 6 M28 34 34 10" strokeWidth="1" strokeDasharray="2 2" />
+                        <path d="M6 30 C12 6 28 34 34 10" />
+                        <circle cx="6" cy="30" r="3" fill="var(--panel)" /><circle cx="34" cy="10" r="3" fill="var(--panel)" />
+                        <rect x="10" y="4" width="4" height="4" fill="var(--panel)" /><rect x="26" y="32" width="4" height="4" fill="var(--panel)" />
+                      </svg>
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "arc-three-point" ? "active" : ""}`} type="button" aria-label="Three-point Arc" title="Three-point Arc — start, end, then height / bulge" onClick={() => onSketchTool("arc-three-point")}>
+                      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M6 28 A14 14 0 0 1 34 28" />
+                        <circle cx="6" cy="28" r="3" fill="var(--panel)" /><circle cx="34" cy="28" r="3" fill="var(--panel)" /><circle cx="20" cy="14" r="3" fill="var(--panel)" />
+                      </svg>
                     </button>
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "smooth" ? "active" : ""}`} type="button" aria-label="Smooth Curve" title="Smooth Curve" onClick={() => onSketchTool("smooth")}>
                       <SketchReferenceIcon name="smooth" />
