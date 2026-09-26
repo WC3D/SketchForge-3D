@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed three-point arcs creating separate coincident endpoints instead of joining existing open paths. Arc joins now preserve curve handles and produce closed, selectable profiles, including when the endpoints are picked in the same order.
+
+- Added a Three-point Arc sketch tool: choose start and end points, then the bulge, with a live preview, cancellation, and one-step undo. Arcs use editable Bezier spans, consistent with sketch circles. Updated the separate Bezier Curve icon to show tangent handles.
+
 - Arrow-key holds (including Ctrl/Cmd+arrow elevation changes) now finish as one undo step and one save on release. Separate taps remain separate undo steps.
 - Reduced autosave work after transforms by sharing CAD display edges across undo states and reusing immutable mesh, B-Rep, and image encoding.
 - Added `.skf` format 2 shared display-edge assets, with continued reading of format 1 packages and legacy JSON projects. New saves require the updated reader.

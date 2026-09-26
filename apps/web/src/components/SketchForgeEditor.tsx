@@ -97,10 +97,12 @@ import type { SculptBrushKind } from "@/lib/sculptBrush";
 import { removeShapeFeature, shapeWithFeatureToggles, withShapeFeatureEnabled } from "@/lib/shapeFeatureToggles";
 import { geometryRotationDegreesForShortcut, geometryRotationDelta, rotatedGeometryShapePatch } from "@/lib/geometryRotation";
 import { createKeyboardMovementInteraction, isMovementKey, moveShapesByKeyboard } from "@/lib/keyboardMovement";
+import { useToolbarMenuPosition } from "@/components/useToolbarMenuPosition";
 import { createLocalId } from "@/lib/localIds";
 import { unionSplitManifoldComponents } from "@/lib/manifoldSplit";
 import { modelSplitPlane, splitPlaneIntersectsPoints, splitShapeFromWorldPositions, type ModelSplitPlane } from "@/lib/modelSplit";
 import { circleFromPoints, circleSketchGeometry } from "@/lib/sketchCircles";
+import { appendSketchArc } from "@/lib/sketchArcs";
 import { moveConstrainedSketchPoint, pruneSketchParameters, setSketchPointFixed, setSketchSegmentConstraint, setSketchSegmentLength, solveSketchProfile } from "@/lib/sketchConstraints";
 import { rectFromPoints, rectangleSketchGeometry } from "@/lib/sketchRectangles";
 import { textSketchGeometry } from "@/lib/sketchTextGeometry";
@@ -7408,6 +7410,7 @@ export function SketchForgeEditor({
     const messages: Record<SketchTool, string> = {
       line: "Line: click points to draw straight segments",
       bezier: "Bézier: click and drag points to pull curve handles",
+      "arc-three-point": "Three-point arc: choose start, end, then the height / bulge point",
       smooth: "Smooth curve: click points to build a flowing path",
       "circle-center": "Center circle: choose the center, then a radius point",
       "circle-diameter": "Two-point circle: choose opposite points on the diameter",
@@ -11047,6 +11050,16 @@ export function SketchForgeEditor({
             initialWorkspace={workspaceSettings}
             planeName={sketchConstructionPlaneId === BASE_CONSTRUCTION_PLANE_ID ? "Base XZ plane" : constructionPlanes.find((plane) => plane.id === sketchConstructionPlaneId)?.name ?? "Construction plane"}
             onPlanePoint={addSketchPlanePoint}
+            onAddArc={(arc) => {
+              const next = appendSketchArc(sketchProfile, arc);
+              const segmentIds = arc.segments.map((segment) => segment.id);
+              const pointIds = [...new Set(next.segments.filter((segment) => segmentIds.includes(segment.id)).flatMap((segment) => [segment.startId, segment.endId]))];
+              const closed = orderedSketchPaths(next).some((path) => path.closed && path.steps.some((step) => segmentIds.includes(step.segment.id)));
+              commitSketchProfile(next, closed ? "Arc profile closed—edit the path or finish the sketch" : "Three-point arc added");
+              setSketchActivePointId(null);
+              setSketchSelection({ kind: "multiple", pointIds, segmentIds });
+              if (closed) setSketchTool("select");
+            }}
             onAddPrimitive={addSketchPrimitive}
             onPointPress={pressSketchPoint}
             onSelectSegment={(id) => {
@@ -11803,10 +11816,12 @@ function SecondaryToolbar({
   const [shapesOpen, setShapesOpen] = useState(false);
   const [sketchCreateOpen, setSketchCreateOpen] = useState(false);
   const [visibilityOpen, setVisibilityOpen] = useState(false);
-  const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
   const shapesMenuRef = useRef<HTMLDivElement>(null);
   const sketchCreateMenuRef = useRef<HTMLDivElement>(null);
   const visibilityMenuRef = useRef<HTMLDivElement>(null);
+  const shapesMenuPosition = useToolbarMenuPosition(shapesOpen, shapesMenuRef, 264);
+  const sketchCreateMenuPosition = useToolbarMenuPosition(sketchCreateOpen, sketchCreateMenuRef, 280);
+  const visibilityMenuPosition = useToolbarMenuPosition(visibilityOpen, visibilityMenuRef, 276);
   const touchShapeStartRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const suppressNextShapeClickRef = useRef(false);
   const cancelProjectNameEditRef = useRef(false);
@@ -11896,37 +11911,17 @@ function SecondaryToolbar({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setVisibilityOpen(false);
     };
-    const closeOnViewportChange = () => setVisibilityOpen(false);
     window.addEventListener("pointerdown", closeOnPointerDown);
     window.addEventListener("keydown", closeOnEscape);
-    window.addEventListener("resize", closeOnViewportChange);
-    window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
       window.removeEventListener("pointerdown", closeOnPointerDown);
       window.removeEventListener("keydown", closeOnEscape);
-      window.removeEventListener("resize", closeOnViewportChange);
-      window.removeEventListener("scroll", closeOnViewportChange, true);
     };
   }, [visibilityOpen]);
   const toggleVisibilityMenu = () => {
     if (visibilityOpen) {
       setVisibilityOpen(false);
       return;
-    }
-    const triggerBounds = visibilityMenuRef.current?.getBoundingClientRect();
-    if (triggerBounds) {
-      const viewportGutter = 12;
-      const menuWidth = Math.min(276, Math.max(0, window.innerWidth - viewportGutter * 2));
-      setVisibilityMenuPosition({
-        top: triggerBounds.bottom + 8,
-        left: Math.max(
-          viewportGutter,
-          Math.min(
-            triggerBounds.left + triggerBounds.width / 2 - menuWidth / 2,
-            window.innerWidth - menuWidth - viewportGutter,
-          ),
-        ),
-      });
     }
     setShapesOpen(false);
     setSketchCreateOpen(false);
@@ -12033,7 +12028,7 @@ function SecondaryToolbar({
             </button>
           </div>
           {shapesOpen ? (
-            <div className="shape-menu-dropdown">
+            <div className="shape-menu-dropdown" style={shapesMenuPosition}>
               <div className="shape-menu-title">Basic Shapes</div>
               <div className="shape-menu-list">
                 {toolbarShapeAssets.map((shape) => (
@@ -12050,12 +12045,12 @@ function SecondaryToolbar({
                       addShapeFromMenu(shape);
                     }}
                     onPointerDown={(event) => {
-                      if (event.pointerType === "touch") {
+                      if (event.pointerType === "touch" || event.pointerType === "pen") {
                         touchShapeStartRef.current = { id: shape.id, x: event.clientX, y: event.clientY };
                       }
                     }}
                     onPointerUp={(event) => {
-                      if (event.pointerType !== "touch") {
+                      if (event.pointerType !== "touch" && event.pointerType !== "pen") {
                         return;
                       }
                       const start = touchShapeStartRef.current;
@@ -12070,6 +12065,7 @@ function SecondaryToolbar({
                       }, 350);
                       addShapeFromMenu(shape);
                     }}
+                    onPointerCancel={() => { touchShapeStartRef.current = null; }}
                     onTouchStart={(event) => {
                       const touch = event.changedTouches[0];
                       if (touch) {
@@ -12180,6 +12176,10 @@ function SecondaryToolbar({
           </>
         ) : toolbarMode === "sculpt" ? (
           <div className="sculpt-toolbar-ribbon" aria-label="Sculpt toolbar">
+            <div className="toolbar-section compact">
+              <div className="toolbar-section-label">History</div>
+              <div className="toolbar-section-tools">{leftTools.filter((tool) => tool.label === "Undo" || tool.label === "Redo").map(renderToolButton)}</div>
+            </div>
             <div className="toolbar-section sculpt-target-section">
               <div className="toolbar-section-label">Sculpt</div>
               <div className="sculpt-toolbar-target">
@@ -12221,8 +12221,19 @@ function SecondaryToolbar({
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "line" ? "active" : ""}`} type="button" aria-label="Line" title="Line" onClick={() => onSketchTool("line")}>
                       <SketchReferenceIcon name="line" />
                     </button>
-                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "bezier" ? "active" : ""}`} type="button" aria-label="Bezier Curve" title="Bezier Curve" onClick={() => onSketchTool("bezier")}>
-                      <SketchReferenceIcon name="bezier" />
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "bezier" ? "active" : ""}`} type="button" aria-label="Bezier Curve" title="Bézier Curve — drag points to set tangent handles" onClick={() => onSketchTool("bezier")}>
+                      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M6 30 12 6 M28 34 34 10" strokeWidth="1" strokeDasharray="2 2" />
+                        <path d="M6 30 C12 6 28 34 34 10" />
+                        <circle cx="6" cy="30" r="3" fill="var(--panel)" /><circle cx="34" cy="10" r="3" fill="var(--panel)" />
+                        <rect x="10" y="4" width="4" height="4" fill="var(--panel)" /><rect x="26" y="32" width="4" height="4" fill="var(--panel)" />
+                      </svg>
+                    </button>
+                    <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "arc-three-point" ? "active" : ""}`} type="button" aria-label="Three-point Arc" title="Three-point Arc — start, end, then height / bulge" onClick={() => onSketchTool("arc-three-point")}>
+                      <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M6 28 A14 14 0 0 1 34 28" />
+                        <circle cx="6" cy="28" r="3" fill="var(--panel)" /><circle cx="34" cy="28" r="3" fill="var(--panel)" /><circle cx="20" cy="14" r="3" fill="var(--panel)" />
+                      </svg>
                     </button>
                     <button className={`toolbar-icon sketch-tool-icon ${sketchTool === "smooth" ? "active" : ""}`} type="button" aria-label="Smooth Curve" title="Smooth Curve" onClick={() => onSketchTool("smooth")}>
                       <SketchReferenceIcon name="smooth" />
@@ -12276,7 +12287,7 @@ function SecondaryToolbar({
                     </button>
                   </div>
                   {shapesOpen ? (
-                    <div className="shape-menu-dropdown sketch-shape-menu-dropdown" role="menu" aria-label="Sketch shapes">
+                    <div className="shape-menu-dropdown sketch-shape-menu-dropdown" role="menu" aria-label="Sketch shapes" style={shapesMenuPosition}>
                       <div className="shape-menu-title">Sketch Shapes</div>
                       <div className="shape-menu-list">
                         {sketchShapeMenuItems.map(({ primitive, label, icon: Icon }) => (
@@ -12404,7 +12415,7 @@ function SecondaryToolbar({
                       <ToolbarCaretDownIcon className="sketch-create-menu-chevron" />
                     </button>
                     {sketchCreateOpen ? (
-                      <div className="sketch-create-dropdown" role="menu" aria-label="Sketch to 3D method">
+                      <div className="sketch-create-dropdown" role="menu" aria-label="Sketch to 3D method" style={sketchCreateMenuPosition}>
                         <button type="button" role="menuitem" onClick={() => startSketch("extrude")}>
                           <strong>Extrude sketch</strong>
                           <span>Raise the profile into a 3D shape</span>
